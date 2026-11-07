@@ -1,0 +1,34 @@
+# Build and development files
+target/
+/.cargo/
+/.direnv/
+/result
+/result-*
+__pycache__/
+*.pyc
+*.swp
+*.swo
+
+# Local configuration and runtime data
+.env
+.env.*
+!.env.example
+*.local.ron
+*.log
+*.sock
+*.pid
+credentials.json
+soloist-api-key
+soloist-api-key.*
+queue.json
+demo-queue.json
+recent.json
+catalog-versions.json
+soloist/
+streaming_cache/
+catalog-v2/
+soloist-package
+soloist-install/
+*.tar.gz
+*.pem
+*.key

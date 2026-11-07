@@ -1,0 +1,12 @@
+[Unit]
+Description=rspc playback daemon
+
+[Service]
+# Install both rspc and rspc-ui in ~/.local/bin before enabling this unit.
+ExecStart=%h/.local/bin/rspc daemon
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

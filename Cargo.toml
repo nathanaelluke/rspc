@@ -1,0 +1,56 @@
+[package]
+name = "rspc"
+version = "0.1.0"
+edition = "2024"
+license = "MIT AND BSD-3-Clause"
+description = "A terminal music player for Spotify, local files and streams"
+default-run = "rspc"
+
+[workspace]
+resolver = "2"
+members = ["crates/rspc-ui"]
+default-members = [".", "crates/rspc-ui"]
+
+[workspace.dependencies]
+clap = { version = "4.6", features = ["derive", "cargo", "string"] }
+strum = { version = "0.27.2", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+
+[dependencies]
+anyhow = "1.0"
+clap = { workspace = true }
+serde = { workspace = true }
+tokio = { version = "1.52", features = ["full"] }
+serde_json = "1.0"
+ron = "0.12"
+libc = "0.2"
+log = "0.4"
+chrono = "0.4.45"
+futures = "0.3.32"
+regex = "1.12"
+rand = "0.10"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+protobuf = "3.7"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect"] }
+librespot-core = { version = "=0.8.6", package = "spotatui-librespot-core", default-features = false, features = ["native-tls"] }
+librespot-oauth = { version = "=0.8.6", package = "spotatui-librespot-oauth", default-features = false }
+librespot-metadata = { version = "=0.8.6", package = "spotatui-librespot-metadata", default-features = false }
+librespot-protocol = { version = "=0.8.6", package = "spotatui-librespot-protocol", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+rspotify = { version = "0.16", default-features = false, features = ["client-reqwest", "reqwest-rustls-tls"] }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.release]
+lto = false
+codegen-units = 16
+opt-level = 2
+strip = true

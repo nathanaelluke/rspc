@@ -1,0 +1,66 @@
+#![enable(implicit_some)]
+#![enable(unwrap_newtypes)]
+#![enable(unwrap_variant_newtypes)]
+(
+    theme: Some("default"),
+    volume_step: 5,
+    album_art: (method: Auto, vertical_align: Top),
+    enable_lyrics_index: false,
+    enable_lyrics_hot_reload: false,
+    spotify: (
+        exclude_folders: ["archive"],
+        exclude_playlists: [],
+    ),
+    tabs: [
+        (
+            name: "Queue",
+            pane: Split(direction: Horizontal, panes: [
+                (size: "35%", borders: "ALL", border_symbols: Plain, pane: Component("now_playing")),
+                (size: "65%", borders: "ALL", border_symbols: Plain, pane: Split(direction: Horizontal, panes: [
+                    (size: "1", pane: Pane(Empty())),
+                    (size: "100%", pane: Split(direction: Vertical, panes: [
+                        (size: "1", pane: Pane(QueueHeader())),
+                        (size: "100%", pane: Pane(Queue)),
+                    ])),
+                    (size: "1", pane: Pane(Empty())),
+                ])),
+            ]),
+        ),
+        (
+            name: "Directories",
+            pane: Split(direction: Vertical, panes: [
+                (size: "100%", borders: "ALL", border_symbols: Plain, pane: Pane(Directories)),
+            ]),
+        ),
+        (
+            name: "Artists",
+            pane: Split(direction: Vertical, panes: [
+                (size: "100%", borders: "ALL", border_symbols: Plain, pane: Pane(Artists)),
+            ]),
+        ),
+        (
+            name: "Album Artists",
+            pane: Split(direction: Vertical, panes: [
+                (size: "100%", borders: "ALL", border_symbols: Plain, pane: Pane(AlbumArtists)),
+            ]),
+        ),
+        (
+            name: "Albums",
+            pane: Split(direction: Vertical, panes: [
+                (size: "100%", borders: "ALL", border_symbols: Plain, pane: Pane(Albums)),
+            ]),
+        ),
+        (
+            name: "Playlists",
+            pane: Split(direction: Vertical, panes: [
+                (size: "100%", borders: "ALL", border_symbols: Plain, pane: Pane(Playlists)),
+            ]),
+        ),
+        (
+            name: "Search",
+            pane: Split(direction: Vertical, panes: [
+                (size: "100%", borders: "ALL", border_symbols: Plain, pane: Pane(Search)),
+            ]),
+        ),
+    ],
+)

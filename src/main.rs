@@ -1,0 +1,329 @@
+use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
+use rspc::paths::{ensure_private_dir, xdg};
+use std::{
+    ffi::OsString,
+    fs,
+    io::Write,
+    os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+};
+
+#[derive(Parser)]
+#[command(
+    version,
+    about = "A terminal player for Spotify, local music and streams"
+)]
+struct Args {
+    #[arg(
+        long,
+        global = true,
+        help = "Use the isolated offline demonstration backend"
+    )]
+    demo: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Use your existing MPD and rmpc configuration for local files"
+    )]
+    local: bool,
+    #[arg(long, global = true)]
+    socket: Option<PathBuf>,
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "Path to the RON configuration file"
+    )]
+    config: Option<PathBuf>,
+    #[arg(long, global = true, help = "Path to the rspc-ui executable")]
+    frontend: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Commands>,
+    #[arg(last = true, help = "Arguments forwarded to rspc-ui")]
+    frontend_args: Vec<OsString>,
+}
+#[derive(Subcommand)]
+enum Commands {
+    /// Run the Spotify engine in the foreground (also used by systemd).
+    Daemon,
+    /// Print daemon playback status without starting it.
+    Status,
+    /// Report direct audio output counters and backend errors.
+    Doctor,
+    /// Start Soloist and wait for Spotify Connect pairing.
+    Pair,
+    /// Stop the background engine and its playback.
+    Stop,
+    /// Log in with Spotify's pairing flow before starting the daemon.
+    Login,
+}
+
+struct Paths {
+    socket: PathBuf,
+    config: PathBuf,
+    queue: PathBuf,
+    log: PathBuf,
+}
+fn install_if_absent(path: &Path, content: &str) -> Result<()> {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(mut file) => {
+            file.write_all(content.as_bytes())?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+impl Paths {
+    fn new(args: &Args) -> Result<Self> {
+        let config_dir = xdg("XDG_CONFIG_HOME", ".config").join("rspc");
+        let state_dir = xdg("XDG_STATE_HOME", ".local/state").join("rspc");
+        let cache_dir = xdg("XDG_CACHE_HOME", ".cache").join("rspc");
+        for dir in [&config_dir, &state_dir, &cache_dir] {
+            ensure_private_dir(dir)?;
+        }
+        ensure_private_dir(&config_dir.join("themes"))?;
+        install_if_absent(
+            &config_dir.join("themes/default.ron"),
+            include_str!("../config/themes/default.ron"),
+        )?;
+        install_if_absent(
+            &config_dir.join("config.ron"),
+            include_str!("../config/config.ron"),
+        )?;
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| state_dir.join("run"));
+        let runtime = runtime.join(if args.demo { "rspc-demo" } else { "rspc" });
+        ensure_private_dir(&runtime)?;
+        Ok(Self {
+            socket: args
+                .socket
+                .clone()
+                .unwrap_or_else(|| runtime.join("mpd.sock")),
+            config: args
+                .config
+                .clone()
+                .unwrap_or_else(|| config_dir.join("config.ron")),
+            queue: state_dir.join(if args.demo {
+                "demo-queue.json"
+            } else {
+                "queue.json"
+            }),
+            log: state_dir.join(if args.demo { "demo.log" } else { "daemon.log" }),
+        })
+    }
+}
+async fn request(socket: &Path, command: &str) -> Result<String> {
+    let stream = UnixStream::connect(socket)
+        .await
+        .context("rspc daemon is not running")?;
+    let (read, mut write) = stream.into_split();
+    let mut read = BufReader::new(read);
+    let mut greeting = String::new();
+    read.read_line(&mut greeting).await?;
+    anyhow::ensure!(
+        greeting.starts_with("OK MPD "),
+        "invalid rspc daemon handshake"
+    );
+    write.write_all(format!("{command}\n").as_bytes()).await?;
+    let mut output = String::new();
+    loop {
+        let mut line = String::new();
+        anyhow::ensure!(read.read_line(&mut line).await? > 0, "daemon disconnected");
+        if line == "OK\n" {
+            break;
+        }
+        if line.starts_with("ACK ") {
+            bail!("{}", line.trim());
+        }
+        output.push_str(&line);
+    }
+    Ok(output)
+}
+async fn running(socket: &Path) -> bool {
+    matches!(tokio::time::timeout(Duration::from_secs(1), request(socket, "rspc_identity")).await, Ok(Ok(reply)) if reply.contains("name: rspc\n"))
+}
+async fn start_daemon(args: &Args, paths: &Paths) -> Result<()> {
+    if running(&paths.socket).await {
+        let identity = request(&paths.socket, "rspc_identity").await?;
+        anyhow::ensure!(
+            identity.contains(&format!("demo: {}\n", u8::from(args.demo))),
+            "socket belongs to a different rspc mode; choose another socket"
+        );
+        return Ok(());
+    }
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&paths.log)?;
+    let mut child = Command::new(std::env::current_exe()?);
+    if let Some(config) = &args.config {
+        child.env("RSPC_MPD_CONFIG", config);
+    }
+    child.args([
+        OsString::from("--socket"),
+        paths.socket.as_os_str().to_owned(),
+    ]);
+    child.arg("--config").arg(&paths.config);
+    if args.demo {
+        child.arg("--demo");
+    }
+    child
+        .arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    // setsid is async-signal-safe; it separates engine lifetime from the terminal.
+    unsafe {
+        child.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = child.spawn()?;
+    for _ in 0..100 {
+        if running(&paths.socket).await {
+            let identity = request(&paths.socket, "rspc_identity").await?;
+            anyhow::ensure!(
+                identity.contains(&format!("demo: {}\n", u8::from(args.demo))),
+                "socket belongs to a different rspc mode; choose another socket"
+            );
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            bail!("daemon exited with {status}; see {}", paths.log.display());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    bail!("daemon did not become ready; see {}", paths.log.display())
+}
+fn frontend(args: &Args) -> Result<PathBuf> {
+    let path = match &args.frontend {
+        Some(path) => path.clone(),
+        None => std::env::current_exe()?.with_file_name("rspc-ui"),
+    };
+    anyhow::ensure!(
+        path.is_file(),
+        "Frontend missing: {}. Build with `cargo build -p rspc -p rspc-ui`.",
+        path.display()
+    );
+    Ok(path)
+}
+
+async fn local(args: &Args) -> Result<()> {
+    anyhow::ensure!(
+        args.command.is_none(),
+        "--local forwards frontend commands after --"
+    );
+    let config = args
+        .config
+        .clone()
+        .unwrap_or_else(|| xdg("XDG_CONFIG_HOME", ".config").join("rmpc/config.ron"));
+    let mut command = tokio::process::Command::new(frontend(args)?);
+    if config.is_file() {
+        command.arg("--config").arg(config);
+    }
+    if let Some(address) = &args.socket {
+        command.arg("--address").arg(address);
+    }
+    let status = command.args(&args.frontend_args).status().await?;
+    anyhow::ensure!(status.success(), "local MPD interface exited with {status}");
+    Ok(())
+}
+
+#[tokio::main(worker_threads = 2)]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    if args.local {
+        return local(&args).await;
+    }
+    let paths = Paths::new(&args)?;
+    match args.command {
+        Some(Commands::Daemon) => {
+            rspc::run_daemon(rspc::DaemonOptions {
+                config: Some(paths.config),
+                socket: paths.socket,
+                queue: paths.queue,
+                demo: args.demo,
+            })
+            .await
+        }
+        Some(Commands::Pair) => {
+            start_daemon(&args, &paths).await?;
+            let _ = request(&paths.socket, "rspc_pair").await?;
+            println!("Select rspc in Spotify's device menu. Waiting for pairing...");
+            for _ in 0..300 {
+                if request(&paths.socket, "rspc_diagnostics")
+                    .await?
+                    .contains("logged_in: 1\n")
+                {
+                    println!("Soloist is paired and ready.");
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            bail!(
+                "Soloist is still waiting for pairing; select rspc in Spotify and run rspc doctor."
+            )
+        }
+        Some(Commands::Doctor) => {
+            print!("{}", request(&paths.socket, "rspc_diagnostics").await?);
+            Ok(())
+        }
+        Some(Commands::Status) => {
+            print!("{}", request(&paths.socket, "status").await?);
+            Ok(())
+        }
+        Some(Commands::Stop) => {
+            request(&paths.socket, "rspc_shutdown").await?;
+            for _ in 0..100 {
+                if !paths.socket.exists() {
+                    println!("rspc daemon stopped");
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            bail!("rspc daemon is still stopping; see {}", paths.log.display())
+        }
+        Some(Commands::Login) => {
+            anyhow::ensure!(
+                !running(&paths.socket).await,
+                "Stop the daemon with `rspc stop` before changing the Spotify login."
+            );
+            rspc::login().await
+        }
+        None => {
+            let frontend = frontend(&args)?;
+            start_daemon(&args, &paths).await?;
+            let status = tokio::process::Command::new(frontend)
+                .arg("--config")
+                .arg(&paths.config)
+                .arg("--address")
+                .arg(&paths.socket)
+                .args(&args.frontend_args)
+                .status()
+                .await?;
+            if !status.success() {
+                bail!("rspc interface exited with {status}");
+            }
+            Ok(())
+        }
+    }
+}

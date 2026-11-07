@@ -1,0 +1,34 @@
+name: Checks
+on: [push, pull_request]
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev mpd
+          rustup update stable --profile minimal
+          rustup default stable
+          rustup component add clippy rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked -j2 --workspace
+      - run: cargo clippy --locked -j2 --workspace --all-targets -- -D warnings
+      - run: cargo build --release --locked -j2 -p rspc -p rspc-ui
+      - name: Process and release checks
+        run: |
+          python3 tests/test_daemon.py
+          python3 tests/test_mixed_sources.py
+          python3 tests/test_pair_on_lan.py
+          python3 tests/test_release_check.py
+          python3 scripts/check-release.py --history
