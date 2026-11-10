@@ -1,8 +1,7 @@
-# rspc
+# Rusty Spotify Player Client
 
 I like rmpc's interface, but most of my music is on Spotify. rspc keeps that
 interface and adds Spotify alongside local files and streams, all in one queue.
-Close the terminal and the music keeps playing.
 
 ![rspc showing the demo queue](assets/screenshot.png)
 
