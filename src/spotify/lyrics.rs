@@ -1,139 +1,124 @@
-// Derived from Spotatui 0.46.0, MIT; see THIRD_PARTY_NOTICES.md.
-//! Track lyrics from Spotify's color-lyrics endpoint.
-
-use super::router::{api_error, retry_read, upstream_error};
-use super::session::SpotifySession;
-use librespot_core::SpotifyId;
-use librespot_core::error::ErrorKind;
-use reqwest::StatusCode;
+//! Optional lyric fetching and LRC export, independent of the displayed layout.
+use super::{client::Client, request};
+use anyhow::{Context, Result};
+use librespot_core::{SpotifyId, error::ErrorKind};
 use serde::Deserialize;
-use serde_json::Value;
-
-/// Lyrics lines as `(start ms, text)`; the start is `0` on every line when not synced.
-#[derive(Debug, PartialEq)]
-pub struct SpotifyLyrics {
-    pub lines: Vec<(u128, String)>,
-    pub synced: bool,
-}
 
 #[derive(Deserialize)]
 struct Response {
-    lyrics: Body,
+    lyrics: Text,
 }
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Body {
+struct Text {
     sync_type: String,
     #[serde(default)]
     lines: Vec<Line>,
 }
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Line {
     start_time_ms: String,
     words: String,
 }
-
-/// The color-lyrics JSON of one track, or `null` when Spotify has none for it.
-pub async fn track_lyrics(session: &SpotifySession, id: &str) -> anyhow::Result<Value> {
-    let track = SpotifyId::from_base62(id)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid track id"))?;
-    let spclient = session.session().spclient();
-    match retry_read(|| spclient.get_lyrics(&track)).await {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        Err(error) if error.kind == ErrorKind::NotFound => Ok(Value::Null),
-        Err(error) => Err(upstream_error(error)),
-    }
+fn clean(text: &str) -> String {
+    text.replace(['\r', '\n'], " ")
 }
-
-pub fn parse_lyrics(value: Value) -> Option<SpotifyLyrics> {
-    let body = serde_json::from_value::<Response>(value).ok()?.lyrics;
-    let synced = body.sync_type == "LINE_SYNCED";
-    let lines: Vec<(u128, String)> = body
+fn lrc(payload: &[u8], track: &crate::model::TrackInfo) -> Result<Option<String>> {
+    let response: Response = serde_json::from_slice(payload)?;
+    if !response
+        .lyrics
         .lines
-        .into_iter()
-        .filter_map(|line| {
-            let start = if synced {
-                line.start_time_ms.parse().ok()?
-            } else {
-                0
-            };
-            Some((start, line.words))
-        })
-        .collect();
-    let has_text = lines.iter().any(|(_, words)| !words.trim().is_empty());
-    has_text.then_some(SpotifyLyrics { lines, synced })
+        .iter()
+        .any(|line| !line.words.trim().is_empty())
+    {
+        return Ok(None);
+    }
+    let mut output = format!(
+        "[ti:{}]\n[ar:{}]\n[al:{}]\n",
+        clean(&track.name),
+        clean(&track.artists.join(", ")),
+        clean(&track.album)
+    );
+    let synced = response.lyrics.sync_type == "LINE_SYNCED";
+    let mut text_written = false;
+    for line in response.lyrics.lines {
+        let time = if synced {
+            match line.start_time_ms.parse::<u64>() {
+                Ok(time) => time,
+                Err(_) => continue,
+            }
+        } else {
+            0
+        };
+        text_written |= !line.words.trim().is_empty();
+        output.push_str(&format!(
+            "[{:02}:{:02}.{:03}]{}\n",
+            time / 60000,
+            time / 1000 % 60,
+            time % 1000,
+            clean(&line.words)
+        ));
+    }
+    Ok(text_written.then_some(output))
 }
-
+pub async fn cache(client: &Client, track: &crate::model::TrackInfo) -> Result<()> {
+    let id = track
+        .uri
+        .as_deref()
+        .and_then(|uri| uri.strip_prefix("spotify:track:"))
+        .context("Lyrics need a Spotify track")?;
+    let id = SpotifyId::from_base62(id)?.to_base62()?;
+    let path = crate::paths::cache()
+        .join("lyrics")
+        .join(format!("spotify:track:{id}.lrc"));
+    if path.is_file() {
+        return Ok(());
+    }
+    let endpoint = format!("/color-lyrics/v2/track/{id}");
+    let payload = match request::read(|| client.get(&endpoint, "application/json")).await {
+        Ok(payload) => payload,
+        Err(error) if error.kind == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(request::upstream(error)),
+    };
+    if let Some(text) = lrc(&payload, track)? {
+        tokio::task::spawn_blocking(move || {
+            crate::paths::write_private_file_atomic(&path, text.as_bytes())
+        })
+        .await??;
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn body(sync_type: &str, lines: &str) -> Value {
-        format!(r#"{{"lyrics":{{"syncType":"{sync_type}","lines":[{lines}],"provider":"MusixMatch"}},"colors":{{}}}}"#)
-      .parse()
-      .unwrap()
-    }
-
     #[test]
-    fn line_synced_lyrics_keep_their_start_times() {
-        let json = body(
-            "LINE_SYNCED",
-            r#"{"startTimeMs":"960","words":"One more time","syllables":[],"endTimeMs":"0"},
-         {"startTimeMs":"4210","words":"♪","syllables":[],"endTimeMs":"0"}"#,
+    fn untimed_text_uses_zero_and_invalid_timed_text_is_not_cached() {
+        let track = crate::model::TrackInfo::default();
+        let raw = br#"{"lyrics":{"syncType":"UNSYNCED","lines":[{"startTimeMs":"bad","words":"words"}]}}"#;
+        assert!(
+            lrc(raw, &track)
+                .unwrap()
+                .unwrap()
+                .contains("[00:00.000]words")
         );
-        assert_eq!(
-            parse_lyrics(json),
-            Some(SpotifyLyrics {
-                lines: vec![(960, "One more time".into()), (4210, "♪".into())],
-                synced: true,
-            })
-        );
+        let raw = br#"{"lyrics":{"syncType":"LINE_SYNCED","lines":[{"startTimeMs":"bad","words":"words"}]}}"#;
+        assert!(lrc(raw, &track).unwrap().is_none());
     }
-
     #[test]
-    fn unsynced_lyrics_are_marked_unsynced() {
-        let json = body(
-            "UNSYNCED",
-            r#"{"startTimeMs":"0","words":"first"},{"startTimeMs":"0","words":"second"}"#,
-        );
-        let lyrics = parse_lyrics(json).unwrap();
-        assert!(!lyrics.synced);
-        assert_eq!(
-            lyrics.lines,
-            vec![(0, "first".into()), (0, "second".into())]
-        );
-    }
-
-    #[test]
-    fn empty_lines_or_a_missing_track_mean_no_lyrics() {
-        assert_eq!(parse_lyrics(body("LINE_SYNCED", "")), None);
-        assert_eq!(parse_lyrics(Value::Null), None);
-    }
-
-    #[test]
-    fn only_blank_lines_mean_no_lyrics_but_a_blank_gap_stays() {
-        let blank = body("UNSYNCED", r#"{"startTimeMs":"0","words":" "}"#);
-        assert_eq!(parse_lyrics(blank), None);
-
-        let with_gap = body(
-            "LINE_SYNCED",
-            r#"{"startTimeMs":"1000","words":"one"},{"startTimeMs":"2000","words":""}"#,
-        );
-        assert_eq!(parse_lyrics(with_gap).unwrap().lines.len(), 2);
-    }
-
-    #[test]
-    fn a_malformed_start_time_drops_only_that_line() {
-        let json = body(
-            "LINE_SYNCED",
-            r#"{"startTimeMs":"x","words":"bad"},{"startTimeMs":"1500","words":"good"}"#,
-        );
-        assert_eq!(
-            parse_lyrics(json).unwrap().lines,
-            vec![(1500, "good".into())]
+    fn timed_text_preserves_empty_gaps_and_rejects_malformed_timestamps() {
+        let track = crate::model::TrackInfo {
+            name: "Fixture".into(),
+            ..Default::default()
+        };
+        let payload = br#"{"lyrics":{"syncType":"LINE_SYNCED","lines":[{"startTimeMs":"1500","words":"first"},{"startTimeMs":"2500","words":""},{"startTimeMs":"bad","words":"bad"}]}}"#;
+        let value = lrc(payload, &track).unwrap().unwrap();
+        assert!(value.contains("[00:01.500]first\n[00:02.500]\n"));
+        assert!(!value.contains("bad"));
+        assert!(
+            lrc(br#"{"lyrics":{"syncType":"UNSYNCED","lines":[]}}"#, &track)
+                .unwrap()
+                .is_none()
         );
     }
 }

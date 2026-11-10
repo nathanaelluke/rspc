@@ -127,9 +127,6 @@ impl Catalog {
                 if self.demo {
                     return Ok((vec![], self.liked().await?));
                 }
-                if self.demo {
-                    return Ok((vec![], self.liked().await?));
-                }
                 ensure!(
                     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()),
                     "invalid playlist ID"

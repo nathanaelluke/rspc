@@ -15,7 +15,6 @@
     preview_metadata_group_style: (fg: "#eeeeee", modifiers: "Bold"),
     highlighted_item_style: (fg: "#b0b0b0", modifiers: "Bold"),
     current_item_style: (fg: "#ffffff", bg: "#3a3a3a", modifiers: "Bold"),
-    keybinds_selection_style: (fg: "#ffffff", bg: "#3a3a3a", modifiers: "Bold"),
     borders_style: (fg: "#4a4a4a"),
     highlight_border_style: (fg: "#707070"),
     symbols: (
@@ -113,7 +112,7 @@
                     (size: "1", pane: Component("separator")),
                     (size: "100%", pane: Pane(Tabs)),
                     (size: "1", pane: Component("separator")),
-                    (size: "auto", pane: Component("volume")),
+                    (size: "10", pane: Component("volume")),
                 ]),
             ),
             (
@@ -171,12 +170,9 @@
         "volume": Pane(Property(
             content: [
                 (kind: Text(" VOL "), style: (fg: "#808080")),
-                (kind: Transform(Truncate(
-                    content: (kind: Property(Widget(Volume)), style: (fg: "#b0b0b0")),
-                    length: 4, from_start: true,
-                ))),
-                (kind: Text(" ")),
-            ], align: Left,
+                (kind: Property(Status(Volume)), style: (fg: "#b0b0b0")),
+                (kind: Text("% "), style: (fg: "#b0b0b0")),
+            ], align: Right,
         )),
         "states": Pane(Property(
             content: [

@@ -5,6 +5,174 @@ fn an_oversized_position_returns_an_error_instead_of_wrapping() {
     assert!(range(&usize::MAX.to_string(), 3).is_err());
 }
 
+#[tokio::test]
+async fn oversized_commands_are_rejected_without_waiting_for_a_newline() {
+    for idle in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            true,
+            dir.path().join("q.json"),
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(serve(server, engine));
+        let mut greeting = [0; 14];
+        client.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(&greeting, b"OK MPD 0.24.0\n");
+        if idle {
+            client.write_all(b"idle player\n").await.unwrap();
+        }
+        client
+            .write_all(&vec![b'x'; MAX_COMMAND_BYTES + 1])
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("unterminated command must still be bounded")
+            .unwrap();
+        assert!(result.unwrap_err().to_string().contains("command too long"));
+    }
+}
+
+#[test]
+fn command_lists_limit_total_bytes_as_well_as_command_count() {
+    let mut list = CommandList {
+        separators: false,
+        bytes: 0,
+        commands: Vec::new(),
+    };
+    for _ in 0..MAX_COMMAND_LIST_BYTES / MAX_COMMAND_BYTES {
+        list.push(vec!["ping".into()], MAX_COMMAND_BYTES).unwrap();
+    }
+    assert!(list.commands.len() < MAX_COMMAND_LIST_LENGTH);
+    assert!(list.push(vec!["ping".into()], 1).is_err());
+    assert_eq!(list.bytes, MAX_COMMAND_LIST_BYTES);
+}
+
+#[tokio::test]
+async fn artwork_downloads_are_bounded_without_a_content_length() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut connection, _) = listener.accept().await.unwrap();
+        // Reading one request line suffices for this deliberately incomplete
+        // HTTP fixture; the response body ends when its connection closes.
+        let mut request = BufReader::new(&mut connection);
+        let mut line = String::new();
+        request.read_line(&mut line).await.unwrap();
+        connection
+            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let chunk = vec![0; 1024 * 1024];
+        for _ in 0..17 {
+            if connection.write_all(&chunk).await.is_err() {
+                break;
+            }
+        }
+    });
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("http://{address}/cover"))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.content_length().is_none());
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), artwork_bytes(response))
+        .await
+        .unwrap();
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("artwork is too large")
+    );
+    server.await.unwrap();
+}
+
+async fn fixture() -> (tempfile::TempDir, Arc<Engine>) {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::new(
+        true,
+        dir.path().join("q.json"),
+        tokio::sync::mpsc::unbounded_channel().0,
+    )
+    .await
+    .unwrap();
+    (dir, engine)
+}
+
+#[tokio::test]
+async fn rejected_seek_does_not_change_the_track_or_start_playback() {
+    let (_dir, engine) = fixture().await;
+    execute(&engine, &words("playid 1").unwrap()).await.unwrap();
+    execute(&engine, &words("pause 1").unwrap()).await.unwrap();
+    for command in ["seekid 2 NaN", "seekid 2 invalid", "seek 1 inf"] {
+        assert!(execute(&engine, &words(command).unwrap()).await.is_err());
+        let state = engine.playback().await;
+        assert_eq!(state.entry.unwrap().id, 1, "{command}");
+        assert!(!state.playing, "{command}");
+    }
+}
+
+#[tokio::test]
+async fn deleting_the_paused_song_keeps_its_replacement_paused() {
+    let (_dir, engine) = fixture().await;
+    for command in ["playid 1", "pause 1", "deleteid 1"] {
+        execute(&engine, &words(command).unwrap()).await.unwrap();
+    }
+    let state = engine.playback().await;
+    assert_eq!(state.entry.unwrap().id, 2);
+    assert!(!state.playing && !state.stopped);
+    assert_eq!(engine.player.lock().await.queue.entries.len(), 2);
+    for command in ["seekcur 12", "pause 0"] {
+        execute(&engine, &words(command).unwrap()).await.unwrap();
+    }
+    let resumed = engine.playback().await;
+    assert_eq!(resumed.entry.unwrap().id, 2);
+    assert!(resumed.playing && resumed.position_ms >= 12_000);
+}
+
+#[tokio::test]
+async fn queue_edits_are_saved_even_when_the_replacement_cannot_play() {
+    let (_dir, engine) = fixture().await;
+    engine.player.lock().await.queue.entries[1].track.uri = Some("unavailable:source".into());
+    execute(&engine, &words("playid 1").unwrap()).await.unwrap();
+    engine.flush().await.unwrap();
+    assert!(
+        execute(&engine, &words("deleteid 1").unwrap())
+            .await
+            .is_err()
+    );
+    engine.flush().await.unwrap();
+    let saved = super::super::queue::Queue::load(&engine.queue_path).unwrap();
+    assert_eq!(
+        saved
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    assert_eq!(saved.current, Some(2));
+    assert!(engine.playback().await.stopped);
+}
+
+#[tokio::test]
+async fn extreme_volume_arguments_saturate_instead_of_overflowing() {
+    let (_dir, engine) = fixture().await;
+    for (value, expected) in [(i64::MAX, 100), (i64::MIN, 0), (42, 42)] {
+        execute(&engine, &words(&format!("volume {value}")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(engine.playback().await.volume, expected);
+    }
+}
+
 async fn idle_cancellation_race(fragmented: bool) {
     let dir = tempfile::tempdir().unwrap();
     let engine = Engine::new(

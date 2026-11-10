@@ -55,29 +55,29 @@ pub struct WarmProgress {
 
 impl Catalog {
     pub(super) async fn request_permit(&self) -> Result<SemaphorePermit<'_>> {
-        let background = is_background();
+        if !is_background() {
+            return Ok(self.limit.acquire().await?);
+        }
         loop {
             ensure!(has_budget(), "background cache request budget exhausted");
-            if background && self.foreground.load(Ordering::Relaxed) > 0 {
+            if self.foreground.load(Ordering::Relaxed) > 0 {
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
             }
             // Never hold all network permits while waiting for foreground work.
-            let permit = if background {
-                match self.limit.try_acquire() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        tokio::time::sleep(Duration::from_millis(25)).await;
-                        continue;
-                    }
+            let permit = match self.limit.try_acquire() {
+                Ok(permit) if self.limit.available_permits() > 0 => permit,
+                permit => {
+                    // Always leave one slot for an interactive miss.
+                    drop(permit);
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    continue;
                 }
-            } else {
-                self.limit.acquire().await?
             };
             let delay = {
                 let mut next = self.next_request.lock().await;
                 let now = std::time::Instant::now();
-                if background && self.foreground.load(Ordering::Relaxed) > 0 {
+                if self.foreground.load(Ordering::Relaxed) > 0 {
                     Duration::from_millis(25)
                 } else if *next > now {
                     next.saturating_duration_since(now)
@@ -175,6 +175,40 @@ mod tests {
     use super::*;
     use crate::daemon::catalog::tests::{cache_page, playlist_track};
     use std::collections::VecDeque;
+
+    #[tokio::test]
+    async fn interactive_requests_do_not_inherit_background_delay() {
+        let catalog = Catalog::new(true);
+        *catalog.next_request.lock().await = std::time::Instant::now() + Duration::from_secs(60);
+        drop(
+            tokio::time::timeout(Duration::from_millis(100), catalog.request_permit())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+
+    #[tokio::test]
+    async fn warming_leaves_a_network_slot_for_interactive_work() {
+        let catalog = Arc::new(Catalog::new(true));
+        let held = catalog.limit.acquire_many(3).await.unwrap();
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let background = Arc::clone(&catalog);
+        let marker = Arc::clone(&started);
+        let task = tokio::spawn(run(async move {
+            let _permit = background.request_permit().await.unwrap();
+            marker.store(true, Ordering::Relaxed);
+        }));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!started.load(Ordering::Relaxed));
+        let foreground = tokio::time::timeout(Duration::from_millis(100), catalog.request_permit())
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        drop((foreground, held));
+        let _ = task.await;
+    }
 
     #[tokio::test]
     async fn interactive_requests_overtake_waiting_background_work() {

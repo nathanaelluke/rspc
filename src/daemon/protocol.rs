@@ -4,7 +4,7 @@ use super::{engine::Engine, queue::Entry};
 use anyhow::{Context, Result, bail, ensure};
 use std::sync::Arc;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
 };
 
@@ -48,6 +48,10 @@ const COMMANDS: &[&str] = &[
     "rspc_identity",
     "rspc_artist_albums",
     "rspc_selection_info",
+    "rspc_diagnostics",
+    "rspc_pair",
+    "rspc_login",
+    "rspc_check_spotify",
     "ping",
     "password",
     "close",
@@ -125,6 +129,56 @@ const COMMANDS: &[&str] = &[
     "channels",
 ];
 
+const MAX_COMMAND_BYTES: usize = 65_536;
+const MAX_COMMAND_LIST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_COMMAND_LIST_LENGTH: usize = 10_000;
+
+struct CommandList {
+    separators: bool,
+    bytes: usize,
+    commands: Vec<Vec<String>>,
+}
+
+impl CommandList {
+    fn push(&mut self, args: Vec<String>, bytes: usize) -> Result<()> {
+        ensure!(
+            self.commands.len() < MAX_COMMAND_LIST_LENGTH
+                && self.bytes + bytes <= MAX_COMMAND_LIST_BYTES,
+            "command list too large"
+        );
+        self.bytes += bytes;
+        self.commands.push(args);
+        Ok(())
+    }
+}
+
+async fn read_command(read: &mut (impl AsyncBufRead + Unpin), line: &mut Vec<u8>) -> Result<usize> {
+    // Keep partial bytes in `line` when an idle event cancels the read. Limit
+    // the read itself so a missing newline cannot grow the buffer indefinitely.
+    let remaining = MAX_COMMAND_BYTES.saturating_sub(line.len()) + 1;
+    let bytes = read.take(remaining as u64).read_until(b'\n', line).await?;
+    ensure!(line.len() <= MAX_COMMAND_BYTES, "command too long");
+    Ok(bytes)
+}
+
+async fn artwork_bytes(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    const MAX_ARTWORK_BYTES: usize = 16 * 1024 * 1024;
+    let length = response.content_length();
+    ensure!(
+        length.is_none_or(|length| length <= MAX_ARTWORK_BYTES as u64),
+        "album artwork is too large"
+    );
+    let mut data = Vec::with_capacity(length.unwrap_or(0) as usize);
+    while let Some(chunk) = response.chunk().await? {
+        ensure!(
+            chunk.len() <= MAX_ARTWORK_BYTES - data.len(),
+            "album artwork is too large"
+        );
+        data.extend_from_slice(&chunk);
+    }
+    Ok(data)
+}
+
 pub fn words(line: &str) -> Result<Vec<String>> {
     let mut result = Vec::new();
     let mut chars = line.trim().chars().peekable();
@@ -176,6 +230,9 @@ pub fn song(entry: &Entry, position: Option<usize>) -> String {
     );
     for artist in &t.artists {
         s.push_str(&format!("Artist: {}\n", clean(artist)));
+    }
+    for genre in &t.genres {
+        s.push_str(&format!("Genre: {}\n", clean(genre)));
     }
     for artist in if t.album_artists.is_empty() {
         &t.artists
@@ -237,6 +294,18 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
         }
         "rspc_diagnostics" => engine.diagnostics().await,
         "rspc_pair" => engine.prepare_audio().await?,
+        "rspc_login" => engine.login_spotify().await?,
+        "rspc_check_spotify" => {
+            ensure!(
+                !engine.catalog.demo,
+                "Spotify login is unavailable in demo mode"
+            );
+            crate::spotify::connection::check_pairing().await?;
+            format!(
+                "catalog_auth: {}\n",
+                crate::spotify::connection::description()
+            )
+        }
         "rspc_identity" => format!(
             "name: rspc\nengine: rspc\nfrontend: rspc-ui\ndemo: {}\n",
             u8::from(engine.catalog.demo)
@@ -245,18 +314,26 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
         "notcommands" | "channels" | "urlhandlers" => String::new(),
         "tagtypes" => {
             if args.len() == 1 {
-                ["Artist", "AlbumArtist", "Album", "Title", "Track", "Date"]
-                    .iter()
-                    .map(|t| format!("tagtype: {t}\n"))
-                    .collect()
+                [
+                    "Artist",
+                    "AlbumArtist",
+                    "Album",
+                    "Title",
+                    "Track",
+                    "Date",
+                    "Genre",
+                ]
+                .iter()
+                .map(|t| format!("tagtype: {t}\n"))
+                .collect()
             } else {
                 String::new()
             }
         }
         "config" => "music_directory: /rspc\n".into(),
         "status" => {
-            let state = engine.playback().await;
             let p = engine.player.lock().await;
+            let state = p.playback();
             let mode = if state.stopped {
                 "stop"
             } else if state.playing {
@@ -350,16 +427,20 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
         }
         "add" | "addid" => {
             let tracks = engine.catalog.resolve(arg(args, 1)?).await?;
-            let ids = {
-                let mut p = engine.player.lock().await;
-                let position = args
-                    .get(2)
-                    .map(|v| p.queue.position(v))
-                    .transpose()?
-                    .unwrap_or(p.queue.entries.len());
-                p.queue.add(tracks, position)?
-            };
-            engine.queue_changed().await;
+            ensure!(
+                command != "addid" || !tracks.is_empty(),
+                "no playable tracks"
+            );
+            let ids = engine
+                .edit_queue(|queue| {
+                    let position = args
+                        .get(2)
+                        .map(|v| queue.position(v))
+                        .transpose()?
+                        .unwrap_or(queue.entries.len());
+                    queue.add(tracks, position)
+                })
+                .await?;
             if command == "addid" {
                 format!("Id: {}\n", ids.first().context("no playable tracks")?)
             } else {
@@ -367,117 +448,89 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
             }
         }
         "clear" => {
-            engine.stop().await;
-            {
-                let mut p = engine.player.lock().await;
-                p.queue.entries.clear();
-                p.queue.current = None;
-                p.queue.changed();
-            }
-            engine.queue_changed().await;
+            engine.clear_queue().await;
             String::new()
         }
         "delete" | "deleteid" => {
-            let removed_current = {
-                let mut p = engine.player.lock().await;
-                let (a, b) = if command == "deleteid" {
-                    let i = p.queue.index(arg(args, 1)?.parse()?)?;
-                    (i, i + 1)
-                } else {
-                    range(arg(args, 1)?, p.queue.entries.len())?
-                };
-                let old = p.queue.current;
-                p.queue.delete(a, b)?;
-                old != p.queue.current
-            };
-            if removed_current {
-                let state = engine.playback().await;
-                let cursor = engine.player.lock().await.queue.cursor();
-                if let Some(i) = cursor {
-                    if !state.stopped {
-                        engine.play(i).await?;
-                    }
-                } else {
-                    engine.stop().await;
-                }
-            }
-            engine.queue_changed().await;
+            engine
+                .edit_queue(|queue| {
+                    let (a, b) = if command == "deleteid" {
+                        let i = queue.index(arg(args, 1)?.parse()?)?;
+                        (i, i + 1)
+                    } else {
+                        range(arg(args, 1)?, queue.entries.len())?
+                    };
+                    queue.delete(a, b)
+                })
+                .await?;
             String::new()
         }
         "move" | "moveid" => {
-            {
-                let mut p = engine.player.lock().await;
-                let (a, b) = if command == "moveid" {
-                    let i = p.queue.index(arg(args, 1)?.parse()?)?;
-                    (i, i + 1)
-                } else {
-                    range(arg(args, 1)?, p.queue.entries.len())?
-                };
-                let dest = p.queue.position(arg(args, 2)?)?;
-                p.queue.move_range(a, b, dest)?;
-            }
-            engine.queue_changed().await;
+            engine
+                .edit_queue(|queue| {
+                    let (a, b) = if command == "moveid" {
+                        let i = queue.index(arg(args, 1)?.parse()?)?;
+                        (i, i + 1)
+                    } else {
+                        range(arg(args, 1)?, queue.entries.len())?
+                    };
+                    let dest = queue.position(arg(args, 2)?)?;
+                    queue.move_range(a, b, dest)
+                })
+                .await?;
             String::new()
         }
         "shuffle" => {
-            {
-                let mut p = engine.player.lock().await;
-                let (a, b) = args
-                    .get(1)
-                    .map(|v| range(v, p.queue.entries.len()))
-                    .transpose()?
-                    .unwrap_or((0, p.queue.entries.len()));
-                ensure!(
-                    a <= b && b <= p.queue.entries.len(),
-                    "invalid shuffle range"
-                );
-                use rand::seq::SliceRandom;
-                p.queue.entries[a..b].shuffle(&mut rand::rng());
-                p.queue.changed();
-            }
-            engine.queue_changed().await;
+            engine
+                .edit_queue(|queue| {
+                    let (a, b) = args
+                        .get(1)
+                        .map(|v| range(v, queue.entries.len()))
+                        .transpose()?
+                        .unwrap_or((0, queue.entries.len()));
+                    ensure!(a <= b && b <= queue.entries.len(), "invalid shuffle range");
+                    use rand::seq::SliceRandom;
+                    queue.entries[a..b].shuffle(&mut rand::rng());
+                    queue.changed();
+                    Ok(())
+                })
+                .await?;
             String::new()
         }
         "swap" | "swapid" => {
-            {
-                let mut p = engine.player.lock().await;
-                let a = if command == "swapid" {
-                    p.queue.index(arg(args, 1)?.parse()?)?
-                } else {
-                    arg(args, 1)?.parse()?
-                };
-                let b = if command == "swapid" {
-                    p.queue.index(arg(args, 2)?.parse()?)?
-                } else {
-                    arg(args, 2)?.parse()?
-                };
-                ensure!(
-                    a < p.queue.entries.len() && b < p.queue.entries.len(),
-                    "queue index out of range"
-                );
-                p.queue.entries.swap(a, b);
-                p.queue.changed();
-            }
-            engine.queue_changed().await;
+            engine
+                .edit_queue(|queue| {
+                    let a = if command == "swapid" {
+                        queue.index(arg(args, 1)?.parse()?)?
+                    } else {
+                        arg(args, 1)?.parse()?
+                    };
+                    let b = if command == "swapid" {
+                        queue.index(arg(args, 2)?.parse()?)?
+                    } else {
+                        arg(args, 2)?.parse()?
+                    };
+                    ensure!(
+                        a < queue.entries.len() && b < queue.entries.len(),
+                        "queue index out of range"
+                    );
+                    queue.entries.swap(a, b);
+                    queue.changed();
+                    Ok(())
+                })
+                .await?;
             String::new()
         }
         "play" | "playid" => {
-            if command == "play" && args.len() == 1 && !engine.playback().await.stopped {
+            if command == "play" && args.len() == 1 {
                 engine.pause(Some(false)).await?;
                 return Ok(Vec::new());
             }
-            let index = {
-                let p = engine.player.lock().await;
-                if command == "playid" {
-                    p.queue.index(arg(args, 1)?.parse()?)?
-                } else {
-                    args.get(1)
-                        .map(|s| s.parse())
-                        .transpose()?
-                        .unwrap_or(p.queue.cursor().unwrap_or(0))
-                }
-            };
-            engine.play(index).await?;
+            if command == "playid" {
+                engine.play_id(arg(args, 1)?.parse()?).await?;
+            } else {
+                engine.play(arg(args, 1)?.parse()?).await?;
+            }
             String::new()
         }
         "pause" => {
@@ -503,19 +556,14 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
             String::new()
         }
         "seek" | "seekid" => {
-            let index = {
-                let p = engine.player.lock().await;
-                if command == "seekid" {
-                    p.queue.index(arg(args, 1)?.parse()?)?
-                } else {
-                    arg(args, 1)?.parse()?
-                }
-            };
-            let old = engine.player.lock().await.queue.cursor();
-            if old != Some(index) {
-                engine.play(index).await?;
+            let seconds = arg(args, 2)?.parse()?;
+            if command == "seekid" {
+                engine.seek_id(arg(args, 1)?.parse()?, seconds).await?;
+            } else {
+                engine
+                    .seek_position(arg(args, 1)?.parse()?, seconds)
+                    .await?;
             }
-            engine.seek(arg(args, 2)?.parse()?, false).await?;
             String::new()
         }
         "setvol" | "volume" => {
@@ -572,16 +620,16 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
                 .find(arg(args, 1)?, command.starts_with("search"))
                 .await?;
             if command.ends_with("add") {
-                {
-                    let mut p = engine.player.lock().await;
-                    let position = if args.get(2).is_some_and(|s| s == "position") {
-                        p.queue.position(arg(args, 3)?)?
-                    } else {
-                        p.queue.entries.len()
-                    };
-                    p.queue.add(tracks, position)?;
-                }
-                engine.queue_changed().await;
+                engine
+                    .edit_queue(|queue| {
+                        let position = if args.get(2).is_some_and(|s| s == "position") {
+                            queue.position(arg(args, 3)?)?
+                        } else {
+                            queue.entries.len()
+                        };
+                        queue.add(tracks, position)
+                    })
+                    .await?;
                 String::new()
             } else {
                 return Ok(list_songs(engine, tracks).await);
@@ -665,12 +713,12 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
                 tracks = tracks[a..b].to_vec();
             }
             if command == "load" {
-                {
-                    let mut p = engine.player.lock().await;
-                    let n = p.queue.entries.len();
-                    p.queue.add(tracks, n)?;
-                }
-                engine.queue_changed().await;
+                engine
+                    .edit_queue(|queue| {
+                        let n = queue.entries.len();
+                        queue.add(tracks, n)
+                    })
+                    .await?;
                 String::new()
             } else if command == "listplaylist" {
                 tracks
@@ -798,14 +846,7 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
                         .send()
                         .await?
                         .error_for_status()?;
-                    ensure!(
-                        response
-                            .content_length()
-                            .is_none_or(|n| n <= 16 * 1024 * 1024),
-                        "album artwork is too large"
-                    );
-                    let data = Arc::new(response.bytes().await?.to_vec());
-                    ensure!(data.len() <= 16 * 1024 * 1024, "album artwork is too large");
+                    let data = Arc::new(artwork_bytes(response).await?);
                     let mut cache = engine.art_cache.lock().await;
                     if cache.len() >= 8 {
                         cache.clear();
@@ -866,18 +907,16 @@ pub async fn serve(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read);
     write.write_all(b"OK MPD 0.24.0\n").await?;
-    let mut pending: Option<(bool, Vec<Vec<String>>)> = None;
+    let mut pending: Option<CommandList> = None;
     let mut events = engine.events.subscribe();
     let mut seen = events.borrow_and_update().clone();
     // Shared with the idle wait so a cancelled read keeps any partial command.
     let mut line = Vec::new();
     loop {
-        if read.read_until(b'\n', &mut line).await? == 0 {
+        if read_command(&mut read, &mut line).await? == 0 {
             return Ok(());
         }
-        if line.len() > 65536 {
-            bail!("command too long");
-        }
+        let command_bytes = line.len();
         let args = words(std::str::from_utf8(&line)?);
         line.clear();
         let args = match args {
@@ -906,11 +945,19 @@ pub async fn serve(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
         }
         if cmd == "command_list_begin" || cmd == "command_list_ok_begin" {
             ensure!(pending.is_none(), "nested command list");
-            pending = Some((cmd == "command_list_ok_begin", Vec::new()));
+            pending = Some(CommandList {
+                separators: cmd == "command_list_ok_begin",
+                bytes: 0,
+                commands: Vec::new(),
+            });
             continue;
         }
         if cmd == "command_list_end" {
-            let (separators, commands) = pending.take().context("no active command list")?;
+            let CommandList {
+                separators,
+                commands,
+                ..
+            } = pending.take().context("no active command list")?;
             let mut failed = false;
             for (i, args) in commands.iter().enumerate() {
                 match execute(&engine, args).await {
@@ -932,9 +979,8 @@ pub async fn serve(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
             }
             continue;
         }
-        if let Some((_, commands)) = &mut pending {
-            ensure!(commands.len() < 10000, "command list too large");
-            commands.push(args);
+        if let Some(list) = &mut pending {
+            list.push(args, command_bytes)?;
             continue;
         }
         if cmd == "idle" {
@@ -960,7 +1006,7 @@ pub async fn serve(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
                 }
                 tokio::select! {
                     result=events.changed()=>{if result.is_err(){return Ok(());}}
-                    n=read.read_until(b'\n', &mut line)=>{
+                    n=read_command(&mut read, &mut line)=>{
                         if n?==0{return Ok(());}
                         let cancel = std::str::from_utf8(&line)?.trim() == "noidle";
                         line.clear();

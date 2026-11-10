@@ -60,7 +60,6 @@ pub struct UiConfig {
     pub borders_style: Style,
     pub highlighted_item_style: Style,
     pub current_item_style: Style,
-    pub keybinds_selection_style: Option<Style>,
     pub highlight_border_style: Style,
     pub column_widths: [u16; 3],
     pub browser_song_format: SongFormat,
@@ -114,7 +113,6 @@ pub struct UiConfigFile {
     pub(super) borders_style: Option<StyleFile>,
     pub(super) highlighted_item_style: Option<StyleFile>,
     pub(super) current_item_style: Option<StyleFile>,
-    pub(super) keybinds_selection_style: Option<StyleFile>,
     pub(super) highlight_border_style: Option<StyleFile>,
     #[deprecated]
     pub(super) show_song_table_header: bool,
@@ -158,7 +156,6 @@ impl Default for UiConfigFile {
                 bg: None,
                 modifiers: Some(Modifiers::Bold),
             }),
-            keybinds_selection_style: None,
             current_item_style: Some(StyleFile {
                 fg: Some("black".to_string()),
                 bg: Some("blue".to_string()),
@@ -448,10 +445,6 @@ impl TryFrom<UiConfigFile> for UiConfig {
                 value.browser_column_widths[1],
                 value.browser_column_widths[2],
             ],
-            keybinds_selection_style: value
-                .keybinds_selection_style
-                .map(|style| style.to_config_or(None, None))
-                .transpose()?,
             tab_bar: TabBar {
                 fill: value.tab_bar.fill,
                 padding: value.tab_bar.padding,

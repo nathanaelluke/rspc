@@ -1,0 +1,12 @@
+[advisories]
+# Review these exceptions whenever the pinned librespot-core 0.8.0 is updated.
+ignore = [
+    # librespot uses RsaPublicKey::verify in connection/handshake.rs. It never
+    # creates an RSA private key or calls the affected decryption operations.
+    "RUSTSEC-2023-0071",
+    # session.rs uses quick_xml::Reader for text nodes, without attributes(),
+    # try_get_attribute(), NsReader or NamespaceResolver. Neither affected XML
+    # path is reachable. Upstream still requires quick-xml 0.38.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

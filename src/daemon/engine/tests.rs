@@ -1,6 +1,65 @@
 use super::*;
 
 #[tokio::test]
+async fn queued_play_ids_survive_an_earlier_queue_reorder() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, _) = mpsc::unbounded_channel();
+    let engine = Engine::new(true, dir.path().join("q.json"), tx)
+        .await
+        .unwrap();
+    let control = engine.control.lock().await;
+    let pending_engine = Arc::clone(&engine);
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let pending = tokio::spawn(async move {
+        started.send(()).unwrap();
+        super::super::protocol::execute(&pending_engine, &["playid".into(), "2".into()]).await
+    });
+    ready.await.unwrap();
+    engine
+        .player
+        .lock()
+        .await
+        .queue
+        .move_range(1, 2, 0)
+        .unwrap();
+    drop(control);
+    pending.await.unwrap().unwrap();
+    assert_eq!(engine.playback().await.entry.unwrap().id, 2);
+}
+
+#[tokio::test]
+async fn delayed_end_events_do_not_advance_a_new_play_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, _) = mpsc::unbounded_channel();
+    let engine = Engine::new(true, dir.path().join("q.json"), tx)
+        .await
+        .unwrap();
+    engine.play(0).await.unwrap();
+    engine.player.lock().await.request = Some(7);
+    let control = engine.control.lock().await;
+    let pending_engine = Arc::clone(&engine);
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let pending = tokio::spawn(async move {
+        started.send(()).unwrap();
+        pending_engine
+            .soloist_event(0, AudioEvent::Ended { request: 7 })
+            .await
+    });
+    ready.await.unwrap();
+    {
+        let mut player = engine.player.lock().await;
+        player.queue.current = Some(2);
+        player.request = Some(8);
+    }
+    drop(control);
+    pending.await.unwrap().unwrap();
+    let player = engine.player.lock().await;
+    assert_eq!(player.queue.current, Some(2));
+    assert_eq!(player.request, Some(8));
+    assert!(player.playing);
+}
+
+#[tokio::test]
 async fn failed_queue_save_is_retried_without_another_queue_change() {
     let dir = tempfile::tempdir().unwrap();
     let parent = dir.path().join("blocked");
@@ -375,7 +434,7 @@ async fn playback_failure_stops_without_skipping_or_rewriting_queue() {
     assert!(after.error.contains("refused audio"));
 }
 #[tokio::test]
-async fn unpaired_play_keeps_queue_and_publishes_pairing_instructions() {
+async fn unpaired_play_keeps_queue_and_publishes_login_instructions() {
     use futures::StreamExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -401,10 +460,10 @@ async fn unpaired_play_keeps_queue_and_publishes_pairing_instructions() {
     let engine = Engine::new(false, path, tx.clone()).await.unwrap();
     *engine.soloist.write().await = Some(Arc::new(Soloist::test_connection(socket, tx)));
     let error = engine.play(0).await.unwrap_err();
-    assert!(error.to_string().contains("Spotify's device menu"));
+    assert!(error.to_string().contains("rspc login"));
     let state = engine.playback().await;
     assert!(state.stopped);
-    assert!(state.error.contains("pair Soloist"));
+    assert!(state.error.contains("rspc login"));
     assert_eq!(engine.player.lock().await.queue.entries.len(), 3);
     assert_eq!(engine.player.lock().await.queue.current, None);
     server.await.unwrap();

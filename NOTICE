@@ -1,0 +1,26 @@
+rspc
+
+The frontend in crates/rspc-ui is derived from rmpc 0.11.0, copyright (c) 2024
+mierak and contributors, under BSD-3-Clause. Its license is retained in
+crates/rspc-ui/LICENSE and LICENSE-BSD-3-Clause. rspc maintains additional catalog
+navigation, caching and layout options while retaining the configuration model.
+
+The backend's MIT license is in LICENSE-MIT. The catalog adapters, queue records,
+HTTP handler and Connect authorization exchange are rspc implementations.
+
+librespot-core, librespot-metadata and librespot-protocol 0.8.0 provide session
+negotiation, metadata and protocol types. They are copyright (c) 2015 Paul Lietar
+and contributors, under MIT; see LICENSE-librespot. The schema in
+protocol/collection.proto comes from librespot's collection2v2.proto. The manual
+pairing reader's storage scrambling follows librespot's legacy credential
+format. Other crates retain their own distributed licenses. rspc does not link
+librespot's playback, discovery or Connect engines.
+
+Spotify Soloist is an external player installed as a separate dependency.
+Homebrew and AUR use their existing packages; Nix fetches Spotify's official
+archive and adjusts Linux loader and audio-library paths locally. Soloist,
+user API keys and pairing state are not included in rspc's release archives.
+Spotify supplies the player's terms, expiry policy and third-party notices:
+https://developer.spotify.com/documentation/soloist/reference/downloads-and-updates
+
+rspc is not endorsed by Spotify, rmpc or librespot.

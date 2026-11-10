@@ -1,15 +1,33 @@
 {
   description = "rspc terminal music player";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  outputs = {nixpkgs, ...}: let
-    system = "x86_64-linux";
-    pkgs = import nixpkgs {inherit system;};
-  in {
-    devShells.${system}.default = pkgs.mkShell {
-      packages = with pkgs; [cargo rustc clippy rustfmt pkg-config python3];
-      buildInputs = [pkgs.openssl];
-      CARGO_BUILD_JOBS = "2";
+  outputs = {self, nixpkgs, ...}: let
+    systems = ["x86_64-linux" "aarch64-linux" "aarch64-darwin"];
+    forAllSystems = nixpkgs.lib.genAttrs systems;
+    packagesFor = system: import nixpkgs {
+      inherit system;
+      # Only Spotify's player is nonfree. Other packages retain normal checks.
+      config.allowUnfreePredicate = pkg: nixpkgs.lib.getName pkg == "soloist";
     };
-    formatter.${system} = pkgs.alejandra;
+  in {
+    packages = forAllSystems (system: let
+      pkgs = packagesFor system;
+      soloist = pkgs.callPackage ./packaging/nix/soloist.nix {};
+      rspc = pkgs.callPackage ./packaging/nix/package.nix {inherit soloist;};
+    in {inherit rspc soloist; default = rspc;});
+    apps = forAllSystems (system: {
+      default = {
+        type = "app";
+        program = "${self.packages.${system}.rspc}/bin/rspc";
+      };
+    });
+    devShells = forAllSystems (system: let pkgs = packagesFor system; in {
+      default = pkgs.mkShell {
+        packages = with pkgs; [cargo rustc clippy rustfmt pkg-config mpd git];
+        buildInputs = [pkgs.openssl];
+        CARGO_BUILD_JOBS = "1";
+      };
+    });
+    formatter = forAllSystems (system: (packagesFor system).alejandra);
   };
 }

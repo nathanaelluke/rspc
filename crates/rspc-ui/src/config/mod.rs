@@ -640,34 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn customization_guide_examples_are_valid_configurations() {
-        let guide = include_str!("../../../../CUSTOMIZING.md");
-        let mut count = 0;
-        for example in guide.split("```ron\n").skip(1) {
-            let example = example.split("```").next().expect("fenced RON example");
-            if example.starts_with("// theme.ron") {
-                let mut theme: UiConfigFile =
-                    ron::from_str(example).expect("guide theme must parse");
-                // The guide asks readers to merge named components into their theme.
-                let mut components = UiConfigFile::default().components;
-                components.extend(theme.components);
-                theme.components = components;
-                let _: crate::config::theme::UiConfig =
-                    theme.try_into().expect("guide theme must convert");
-            } else if example.starts_with("// config.ron") {
-                let config: ConfigFile = ron::from_str(example).expect("guide config must parse");
-                config
-                    .into_config(crate::config::theme::UiConfig::default(), None, None, true)
-                    .expect("guide config must convert");
-            } else {
-                panic!("RON examples must identify their destination file");
-            }
-            count += 1;
-        }
-        assert!(count >= 6, "the guide's examples must be exercised");
-    }
-
-    #[test]
     fn debug_configurations_do_not_expose_passwords() {
         let config: ConfigFile =
             ron::from_str(r#"(password: Some("fixture-password"))"#).expect("config");

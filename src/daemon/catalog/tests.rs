@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn persistent_pages_are_partitioned_by_account_without_storing_its_name() {
+    let first = account_namespace(Some("first-user"));
+    assert_eq!(first, account_namespace(Some("first-user")));
+    assert_ne!(first, account_namespace(Some("second-user")));
+    assert!(!first.contains("first-user"));
+    assert_ne!(account_namespace(None), account_namespace(None));
+}
+
+#[test]
 fn duplicate_names_preserve_every_item_and_accept_unicode_ids() {
     let mut names = BTreeMap::new();
     insert_named(&mut names, "Curator".into(), "abcdefgh一".into());
@@ -793,6 +802,12 @@ async fn artist_index_reads_one_page_without_resolving_any_track_metadata() {
     let page = catalog.artist_album_page("Composer", 0).await.unwrap();
     assert_eq!(page.albums.len(), 100);
     assert_eq!(page.next, Some(100));
+    assert_eq!(page.total, Some(700));
+    let info = catalog.selection_info("artist", "Composer").await.unwrap();
+    assert!(
+        info.contains(&("Releases".into(), "700".into())),
+        "Artist info must use the reported total without requesting every page"
+    );
     assert!(catalog.tracks.lock().await.is_empty());
     assert_eq!(catalog.albums.lock().await.len(), 100);
     catalog.cache.lock().await.clear();

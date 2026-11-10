@@ -1,60 +1,84 @@
 # rspc
 
-rspc puts Spotify tracks, local music and streams in one terminal queue. A
-background daemon owns playback, so closing the interface leaves the music
-running.
+I like rmpc's interface, but most of my music is on Spotify. rspc keeps that
+interface and adds Spotify alongside local files and streams, all in one queue.
+Close the terminal and the music keeps playing.
 
-The interface has configurable panes, themes and keybindings. Albums shows saved
-albums, Artists opens the full discographies of followed artists, and Album
-Artists stays within saved albums. Directories also includes liked songs, local
-files and playlists made by people you follow.
+![rspc showing the demo queue](assets/screenshot.png)
 
-## Build
+## Install
 
-The current setup targets Linux on x86-64. With Nix installed:
+The package definitions are ready; AUR and Homebrew publication is pending.
+Once published, these installs also provide Spotify's Soloist player:
+
+| Package manager | Command |
+| --- | --- |
+| AUR | `yay -S rspc-git` |
+| Homebrew | `brew install --cask nathanaelluke/tap/rspc` |
+| Nix, from a checkout | `nix profile add .#rspc --max-jobs 1 --cores 1` |
+
+Targets are Linux x86-64, Linux AArch64 and Apple Silicon macOS 13 or newer.
+Native Windows and Spotify playback on Intel Macs are not supported. Linux
+release binaries require OpenSSL 3 and glibc 2.35 on x86-64 or 2.39 on AArch64.
+Soloist also needs a working audio service; on Linux, use PipeWire or PulseAudio.
+
+To build from source, install current stable Rust, a C compiler, `pkg-config`
+and OpenSSL development headers. Native dependencies:
+
+| Platform | Packages |
+| --- | --- |
+| Arch | `base-devel rust pkgconf openssl git` |
+| Debian / Ubuntu | `build-essential pkg-config libssl-dev git`, plus stable Rust |
+| Fedora | `gcc rust cargo pkgconf-pkg-config openssl-devel git` |
+| macOS | Xcode command-line tools; `brew install rust pkgconf openssl@3` |
 
 ```sh
-nix develop
-cargo build --release --locked -j2 -p rspc -p rspc-ui
-scripts/install.sh
+git clone https://github.com/nathanaelluke/rspc.git
+cd rspc
+# Alternatively, enter `nix develop` for the build dependencies.
+cargo build --release --locked -j1 -p rspc -p rspc-ui
+./scripts/install.sh
 ```
 
-The installer links both executables into `~/.local/bin`. Add that directory to
-your shell's `PATH` if it is not there already. Without Nix, building needs Rust,
-`pkg-config` and the OpenSSL development libraries; the Soloist setup script
-below still uses Nix.
+The installer copies both executables into `~/.local/bin`; add it to PATH.
+It keeps your config intact and supports `--prefix` and `DESTDIR` for system
+packages. Run one build at a time on machines with limited RAM; a Nix package
+build uses a separate cache and can still need substantial memory.
 
-## Spotify
+Source installs also need Soloist: install `spotify-soloist-bin` from AUR,
+`brew install --cask spotify-soloist`, or `nix profile add .#soloist`.
+On other systems, put the executable from
+[Spotify's downloads](https://developer.spotify.com/documentation/soloist/reference/downloads-and-updates)
+on PATH. On NixOS, use the Nix package for its loader and audio libraries.
+`RSPC_SOLOIST_PATH` overrides discovery; older private installs remain a fallback.
+rspc starts its own player, so do not enable a separate Soloist service for it.
 
-You need Spotify Premium and your own [Soloist API key](https://developer.spotify.com/dashboard/soloist).
-The key and player are installed locally; neither is included in this repo.
+## Spotify setup
 
-1. Save the key in `~/.config/rspc/soloist-api-key` and run
-   `chmod 600 ~/.config/rspc/soloist-api-key`.
-2. Run `scripts/setup-soloist.sh` to download Spotify's player.
-3. Run `rspc login`, then `rspc pair`.
-4. Select **rspc** once in Spotify's device menu to complete pairing.
-
-After pairing, playing a track in rspc activates its output automatically. The
-interface can be closed and reopened without repeating setup. Soloist builds
-expire; rerun the setup script when an update is required.
-
-If the device is missing on a NixOS machine, `scripts/pair-on-lan.py` can open the
-discovery ports temporarily. Use `--dry-run` to inspect the rules first; a normal
-run removes its rules when pairing finishes.
-
-## Local music and streams
-
-Local playback needs a running MPD with partition support and a configured music
-library. rspc uses its own partition and returns the borrowed output when local
-playback stops. The default MPD queue is left alone.
-
-MPD connection settings come from `~/.config/rmpc/config.ron`, or the file passed
-with `--config`. `RSPC_MPD_ADDRESS`, `RSPC_MPD_PASSWORD` and `RSPC_MPD_OUTPUT`
-override them. MPD is optional for Spotify-only use.
+You need Spotify Premium and your own
+[Soloist API key](https://developer.spotify.com/dashboard/soloist).
+Save the key in `~/.config/rspc/soloist-api-key`, restrict it with `chmod 600`,
+then run:
 
 ```sh
+rspc login
 rspc
+```
+
+Complete the authorization shown in the terminal. That single sign-in covers
+library access and playback; selecting a device from your phone is unnecessary.
+Use `rspc login --repair` to repair an expired or revoked audio session. It
+restarts the player and interrupts playback.
+
+Soloist builds expire 90 days after their build date. Keep its package current:
+`yay -Syu` on Arch, or `brew upgrade --cask --greedy spotify-soloist` on Homebrew.
+Nix users need an updated rspc flake input. Stop rspc before updating its player.
+The player is downloaded separately from Spotify, not bundled in rspc's releases.
+
+## Using rspc
+
+```sh
+rspc                          # open the interface
 rspc -- add /path/to/song.flac
 rspc -- add https://example.org/stream
 rspc --local                  # use your existing MPD queue directly
@@ -62,42 +86,56 @@ rspc doctor                   # inspect player state and errors
 rspc stop                     # stop the daemon and playback
 ```
 
-Use **Directories → Local Files** to browse MPD's library. Spotify and local
-entries can be reordered together. Switching between the two players may leave
-a short gap. Spotify playlists cannot store local files; local playlists appear
-under **Directories → Local Playlists**.
+Local files and streams need MPD with partition support and a configured library.
+rspc uses a separate partition and leaves your default MPD queue alone. It reads
+MPD settings from `~/.config/rmpc/config.ron`, or the file passed with `--config`.
+`RSPC_MPD_ADDRESS`, `RSPC_MPD_PASSWORD` and `RSPC_MPD_OUTPUT` override them.
+MPD is optional for Spotify-only use.
 
-## Make it yours
+Albums contains saved albums; Artists opens followed artists' full discographies;
+Album Artists stays within saved albums. Directories includes liked songs,
+local files and followed users' playlists. Spotify and local tracks can share a
+queue, with a short gap when switching players. Spotify playlists cannot store
+local files; local playlists appear under **Directories → Local Playlists**.
 
-Configuration lives in `~/.config/rspc/config.ron`, with themes alongside it in
-`themes/`. rspc keeps rmpc's RON configuration model. Existing configurations can
-be passed with `--config`; MPD-specific features such as stickers, crossfade and
-ReplayGain need `--local`.
+## Configuration
 
-[CUSTOMIZING.md](CUSTOMIZING.md) explains which file controls each part of the
-interface, with examples and instructions for agents. For example:
-
-> Read AGENTS.md and CUSTOMIZING.md. Make the header compact, use a warm gray
-> palette, and keep my existing keys and pane order. Preview the result at wide
-> and narrow terminal sizes.
+Configuration lives in `~/.config/rspc/config.ron`, with themes in `themes/`.
+Themes, layouts and keybindings use rmpc 0.11's RON configuration format; use
+[rmpc's documentation](https://rmpc.mierak.dev/configuration/) to customize them.
+The shipped defaults are in `config/`.
+Pass an existing config with `--config`. MPD-specific features such as stickers
+and ReplayGain need `--local`; Spotify-specific options live under `spotify`.
 
 To hide playlists or folders, set `spotify.exclude_playlists` and
-`spotify.exclude_folders` in the main config. Rules accept names and Spotify
-URIs; folder rules also accept full folder paths and include descendants. Names
-are case insensitive, IDs are not. The default hides folders named `archive`.
-Changes reload without restarting playback.
+`spotify.exclude_folders`. Rules accept names and Spotify URIs; folder rules
+also accept paths and include descendants. Names are case insensitive. The
+default hides folders named `archive`. Changes reload without restarting music.
 
-Library pages are cached under `~/.cache/rspc` and warmed in the background.
-The first sync needs a network connection. Queue state and player logs live under
-`~/.local/state/rspc`. XDG directory overrides are supported. Keep those private
-files out of bug reports and commits; see [SECURITY.md](SECURITY.md).
+Catalog caches live in `~/.cache/rspc`; queue state, pairing and logs live in
+`~/.local/state/rspc`. XDG overrides are supported. Keep these files and your
+Soloist key out of commits and bug reports. Logs can contain paths and library
+metadata; inspect them before sharing and use `rspc --demo` for public screenshots.
 
-## Development and credits
+## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the workspace layout and checks, and
-[TESTING.md](TESTING.md) for test coverage.
+`nix develop` provides the build dependencies and MPD for tests. Run `make check`
+for the Rust unit and integration tests, formatting, and Clippy. Tests use
+isolated directories and players; live Spotify checks require an explicit
+`--ignored` invocation and a saved login.
 
-The frontend is derived from [rmpc](https://github.com/mierak/rmpc). Some Spotify
-protocol helpers came from [Spotatui](https://github.com/LargeModGames/spotatui).
-Their copyright notices are retained; [UPSTREAMS.md](UPSTREAMS.md) records the
-sources and licenses. rspc is not affiliated with Spotify or either upstream.
+Release tools live in `crates/xtask`. To check the working tree, index and Git
+history for private files and credentials:
+
+```sh
+cargo run --locked -p xtask -- check-release --history
+```
+
+Version tags create draft releases with binaries, checksums and package recipes.
+Native builds run in CI for each release target. The privacy check catches common
+mistakes; review files and history yourself before publishing.
+
+The frontend is derived from [rmpc](https://github.com/mierak/rmpc); protocol
+libraries come from [librespot](https://github.com/librespot-org/librespot).
+Audio playback uses Soloist or MPD. See [NOTICE](NOTICE) and the license files
+for attribution. rspc is not affiliated with Spotify or its upstream projects.

@@ -1,19 +1,21 @@
 //! Only Spotify session, pairing and catalog protocol code; no application runtime.
+mod auth;
 mod catalog;
-pub mod credentials;
-mod json;
-mod library;
+use catalog::{collection as library, playlists, search};
+mod protocol {
+    include!(concat!(env!("OUT_DIR"), "/spotify-protocol/mod.rs"));
+}
+mod client;
+pub(crate) mod connect_auth;
+pub mod connection;
+pub mod login;
 // Retained for optional Spotify lyrics; the default setup disables lyrics.
 #[allow(dead_code)]
 mod lyrics;
-mod metadata;
 mod people;
-mod playlists;
-mod router;
-pub(crate) use router::ApiError;
-mod search;
-pub mod session;
+mod request;
 use anyhow::{Context, Result, bail};
+pub(crate) use request::ApiError;
 use serde_json::Value;
 use std::sync::OnceLock;
 #[derive(Clone, Debug)]
@@ -33,15 +35,11 @@ pub enum PlaylistChange {
     Rename(String),
 }
 pub async fn edit_playlist(id: &str, change: PlaylistChange) -> Result<()> {
-    let session = session::current()
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+    let session = connection::current().await.map_err(anyhow::Error::from)?;
     playlists::edit(&session, id, change).await
 }
 pub async fn create_playlist(name: &str, uris: Vec<String>) -> Result<()> {
-    let session = session::current()
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+    let session = connection::current().await.map_err(anyhow::Error::from)?;
     let playlist = playlists::create(
         &session,
         Some(&serde_json::json!({"name":name,"public":false})),
@@ -67,15 +65,14 @@ pub async fn create_playlist(name: &str, uris: Vec<String>) -> Result<()> {
     Ok(())
 }
 pub async fn remove_playlist(id: &str) -> Result<()> {
-    let session = session::current()
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+    let session = connection::current().await.map_err(anyhow::Error::from)?;
     playlists::unlist(&session, &format!("spotify:playlist:{id}")).await
 }
 pub fn http() -> &'static reqwest::Client {
     static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
     HTTP.get_or_init(|| {
         reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(12))
             .build()
             .unwrap()
@@ -86,10 +83,8 @@ pub async fn get(
     q: &[(&str, String)],
     exclusions: &crate::config::PlaylistExclusions,
 ) -> Result<Value> {
-    let s = session::current()
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
-    let paging = router::Paging::from_query(q, 100);
+    let s = connection::current().await.map_err(anyhow::Error::from)?;
+    let paging = request::Window::query(q, 100);
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
     match parts.as_slice() {
         ["me", "playlists"] => playlists::user_playlists(&s, q, exclusions).await,
@@ -102,15 +97,10 @@ pub async fn get(
             Ok(serde_json::json!({"items":load_recent(),"next":null}))
         }
         ["tracks"] => {
-            catalog::tracks_by_ids(&s, router::query_value(q, "ids").unwrap_or_default()).await
+            catalog::tracks_by_ids(&s, request::parameter(q, "ids").unwrap_or_default()).await
         }
         ["tracks", id] => catalog::track(&s, id).await,
-        ["albums", id] => {
-            let album =
-                metadata::get_one::<librespot_metadata::Album>(&s, &format!("spotify:album:{id}"))
-                    .await?;
-            Ok(json::album_index(&album))
-        }
+        ["albums", id] => catalog::album(&s, id).await,
         ["albums", id, "tracks"] => catalog::album_tracks(&s, id, paging).await,
         ["artists", id, "albums"] => catalog::artist_albums(&s, id, paging).await,
         ["playlists", id, "tracks"] => playlists::playlist_items(&s, id, q).await,
@@ -141,51 +131,6 @@ pub fn record(track: &crate::model::TrackInfo) {
 // Kept available alongside the lyrics module; fetching is not automatic.
 #[allow(dead_code)]
 pub async fn cache_lyrics(track: crate::model::TrackInfo) -> Result<()> {
-    let uri = track.uri.as_deref().context("missing lyric track URI")?;
-    let id = uri
-        .strip_prefix("spotify:track:")
-        .context("not a Spotify track")?;
-    anyhow::ensure!(
-        id.chars().all(|c| c.is_ascii_alphanumeric()),
-        "invalid lyric URI"
-    );
-    let dir = crate::paths::cache().join("lyrics");
-    let path = dir.join(format!("{uri}.lrc"));
-    if path.is_file() {
-        return Ok(());
-    }
-    let session = session::current()
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
-    let value = lyrics::track_lyrics(&session, id).await?;
-    let Some(lyrics) = lyrics::parse_lyrics(value) else {
-        return Ok(());
-    };
-    let clean = |s: &str| s.replace(['\r', '\n'], " ");
-    let mut text = format!(
-        "[ti:{}]\n[ar:{}]\n[al:{}]\n",
-        clean(&track.name),
-        clean(&track.artists.join(", ")),
-        clean(&track.album)
-    );
-    for (time, words) in lyrics.lines {
-        text.push_str(&format!(
-            "[{:02}:{:02}.{:03}]{}\n",
-            time / 60000,
-            (time / 1000) % 60,
-            time % 1000,
-            clean(&words)
-        ));
-    }
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        crate::paths::write_private_file_atomic(&path, text.as_bytes())?;
-        use std::io::Write;
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(path)?
-            .write_all(b"\n")?;
-        Ok(())
-    })
-    .await??;
-    Ok(())
+    let client = connection::current().await.map_err(anyhow::Error::from)?;
+    lyrics::cache(&client, &track).await
 }

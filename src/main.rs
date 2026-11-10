@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
 };
 
@@ -61,8 +61,15 @@ enum Commands {
     Pair,
     /// Stop the background engine and its playback.
     Stop,
-    /// Log in with Spotify's pairing flow before starting the daemon.
-    Login,
+    /// Sign in once for the Spotify library, profiles and audio playback.
+    Login {
+        /// Authorize only the catalog, without setting up the audio player.
+        #[arg(long)]
+        catalog: bool,
+        /// Restart the player and renew its authorization; stops playback.
+        #[arg(long, conflicts_with = "catalog")]
+        repair: bool,
+    },
 }
 
 struct Paths {
@@ -128,22 +135,39 @@ impl Paths {
     }
 }
 async fn request(socket: &Path, command: &str) -> Result<String> {
+    tokio::time::timeout(Duration::from_secs(45), request_reply(socket, command))
+        .await
+        .context("rspc daemon response timed out")?
+}
+async fn request_reply(socket: &Path, command: &str) -> Result<String> {
+    const MAX_REPLY: usize = 1024 * 1024;
     let stream = UnixStream::connect(socket)
         .await
         .context("rspc daemon is not running")?;
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read);
     let mut greeting = String::new();
-    read.read_line(&mut greeting).await?;
+    (&mut read).take(128).read_line(&mut greeting).await?;
     anyhow::ensure!(
-        greeting.starts_with("OK MPD "),
+        greeting.starts_with("OK MPD ") && greeting.ends_with('\n'),
         "invalid rspc daemon handshake"
     );
     write.write_all(format!("{command}\n").as_bytes()).await?;
     let mut output = String::new();
     loop {
         let mut line = String::new();
-        anyhow::ensure!(read.read_line(&mut line).await? > 0, "daemon disconnected");
+        anyhow::ensure!(
+            (&mut read)
+                .take((MAX_REPLY - output.len() + 1) as u64)
+                .read_line(&mut line)
+                .await?
+                > 0,
+            "daemon disconnected"
+        );
+        anyhow::ensure!(
+            output.len() + line.len() <= MAX_REPLY && line.ends_with('\n'),
+            "rspc daemon response exceeded its limit"
+        );
         if line == "OK\n" {
             break;
         }
@@ -265,23 +289,20 @@ async fn main() -> Result<()> {
             })
             .await
         }
-        Some(Commands::Pair) => {
-            start_daemon(&args, &paths).await?;
-            let _ = request(&paths.socket, "rspc_pair").await?;
-            println!("Select rspc in Spotify's device menu. Waiting for pairing...");
-            for _ in 0..300 {
-                if request(&paths.socket, "rspc_diagnostics")
-                    .await?
-                    .contains("logged_in: 1\n")
-                {
-                    println!("Soloist is paired and ready.");
-                    return Ok(());
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+        Some(Commands::Pair) => pair(&args, &paths).await,
+        Some(Commands::Login {
+            catalog: false,
+            repair: false,
+        }) => login(&args, &paths).await,
+        Some(Commands::Login {
+            catalog: false,
+            repair: true,
+        }) => {
+            anyhow::ensure!(!args.demo, "Spotify login is unavailable in demo mode");
+            if running(&paths.socket).await {
+                stop(&paths).await?;
             }
-            bail!(
-                "Soloist is still waiting for pairing; select rspc in Spotify and run rspc doctor."
-            )
+            login(&args, &paths).await
         }
         Some(Commands::Doctor) => {
             print!("{}", request(&paths.socket, "rspc_diagnostics").await?);
@@ -291,23 +312,13 @@ async fn main() -> Result<()> {
             print!("{}", request(&paths.socket, "status").await?);
             Ok(())
         }
-        Some(Commands::Stop) => {
-            request(&paths.socket, "rspc_shutdown").await?;
-            for _ in 0..100 {
-                if !paths.socket.exists() {
-                    println!("rspc daemon stopped");
-                    return Ok(());
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            bail!("rspc daemon is still stopping; see {}", paths.log.display())
-        }
-        Some(Commands::Login) => {
+        Some(Commands::Stop) => stop(&paths).await,
+        Some(Commands::Login { catalog: true, .. }) => {
             anyhow::ensure!(
                 !running(&paths.socket).await,
                 "Stop the daemon with `rspc stop` before changing the Spotify login."
             );
-            rspc::login().await
+            rspc::catalog_login().await
         }
         None => {
             let frontend = frontend(&args)?;
@@ -325,5 +336,107 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+async fn stop(paths: &Paths) -> Result<()> {
+    request(&paths.socket, "rspc_shutdown").await?;
+    for _ in 0..100 {
+        if !paths.socket.exists() {
+            println!("rspc daemon stopped");
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    bail!("rspc daemon is still stopping; see {}", paths.log.display())
+}
+
+async fn pair(args: &Args, paths: &Paths) -> Result<()> {
+    anyhow::ensure!(!args.demo, "Spotify login is unavailable in demo mode");
+    start_daemon(args, paths).await?;
+    let _ = request(&paths.socket, "rspc_pair").await?;
+    println!("Select rspc in Spotify's device menu if it is not paired yet.");
+    for _ in 0..300 {
+        if request(&paths.socket, "rspc_diagnostics")
+            .await?
+            .contains("logged_in: 1\n")
+        {
+            let _ = request(&paths.socket, "rspc_check_spotify").await?;
+            println!("Spotify pairing verified for playback and library access.");
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("Soloist is still waiting for pairing; select rspc in Spotify and run rspc doctor.")
+}
+
+async fn login(args: &Args, paths: &Paths) -> Result<()> {
+    anyhow::ensure!(!args.demo, "Spotify login is unavailable in demo mode");
+    if running(&paths.socket).await {
+        anyhow::ensure!(
+            request(&paths.socket, "commands")
+                .await?
+                .contains("command: rspc_login\n"),
+            "The running daemon needs an update: run rspc stop, then rspc login."
+        );
+    }
+    rspc::ensure_catalog_login().await?;
+    start_daemon(args, paths).await?;
+    let _ = request(&paths.socket, "rspc_login").await?;
+    println!("Spotify login verified for catalog access and Soloist playback.");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn launcher_rejects_an_oversized_daemon_greeting() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = stream.write_all(&vec![b'x'; 512]).await;
+        });
+        assert!(request(&socket, "status").await.is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn launcher_bounds_unterminated_daemon_responses() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"OK MPD 0.24.0\n").await.unwrap();
+            let mut read = BufReader::new(stream);
+            let mut line = String::new();
+            read.read_line(&mut line).await.unwrap();
+            let _ = read.get_mut().write_all(&vec![b'x'; 1024 * 1024 + 1]).await;
+        });
+        assert!(request(&socket, "status").await.is_err());
+        server.await.unwrap();
+    }
+    #[test]
+    fn pairing_repair_and_catalog_login_cannot_run_together() {
+        assert!(Args::try_parse_from(["rspc", "login", "--repair", "--catalog"]).is_err());
+        assert!(matches!(
+            Args::try_parse_from(["rspc", "login"]).unwrap().command,
+            Some(Commands::Login {
+                catalog: false,
+                repair: false
+            })
+        ));
+        assert!(matches!(
+            Args::try_parse_from(["rspc", "login", "--repair"])
+                .unwrap()
+                .command,
+            Some(Commands::Login {
+                catalog: false,
+                repair: true
+            })
+        ));
     }
 }

@@ -1,4 +1,5 @@
 //! Spotify's official Soloist player, controlled over one persistent local socket.
+pub(crate) mod discovery;
 use crate::{
     model::{ArtistRef, TrackInfo},
     playback::{AudioEvent, AudioUpdate},
@@ -58,6 +59,7 @@ impl State {
         self.position = 0;
         self.at = Some(Instant::now());
         self.speed = 0.0;
+        self.status = "loading".into();
     }
     fn set_active(&mut self, active: bool) {
         self.active = active;
@@ -274,6 +276,7 @@ fn track_from_entity(entity: &Value) -> Option<TrackInfo> {
         .collect();
     Some(TrackInfo {
         uri: Some(uri.into()),
+        genres: Vec::new(),
         id: uri.strip_prefix("spotify:track:").map(str::to_owned),
         name: d["identity"]["name"].as_str().unwrap_or(uri).into(),
         artists: artist_refs.iter().map(|a| a.name.clone()).collect(),
@@ -331,29 +334,93 @@ pub struct Soloist {
     events: tokio::task::JoinHandle<()>,
 }
 pub fn binary() -> PathBuf {
-    std::env::var_os("RSPC_SOLOIST_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| crate::paths::state().join("soloist-package/bin/soloist"))
+    find_binary(
+        std::env::var_os("RSPC_SOLOIST_PATH"),
+        std::env::var_os("PATH"),
+        &crate::paths::state(),
+    )
+}
+
+fn find_binary(
+    explicit: Option<std::ffi::OsString>,
+    search: Option<std::ffi::OsString>,
+    state: &std::path::Path,
+) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(path) = explicit {
+        return PathBuf::from(path);
+    }
+    let executable = |path: &PathBuf| {
+        path.metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    };
+    // Prefer the package manager's player so upgrades replace legacy installs.
+    // An explicit override remains authoritative, including when it is invalid.
+    if let Some(path) = search.and_then(|path| {
+        std::env::split_paths(&path)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(|dir| dir.join("soloist"))
+            .find(executable)
+    }) {
+        return path;
+    }
+    let candidates = [
+        state.join("soloist-bin/soloist"),
+        state.join("soloist-package/bin/soloist"),
+    ];
+    candidates
+        .into_iter()
+        .find(executable)
+        .unwrap_or_else(|| state.join("soloist-bin/soloist"))
 }
 pub fn key_file() -> PathBuf {
     crate::paths::xdg("XDG_CONFIG_HOME", ".config").join("rspc/soloist-api-key")
 }
-fn api_key() -> Result<String> {
+pub(crate) fn api_key() -> Result<String> {
     let key = std::env::var("RSPC_SOLOIST_API_KEY")
         .ok()
         .or_else(|| std::fs::read_to_string(key_file()).ok())
         .context(
-            "Soloist API key missing: save it in ~/.config/rspc/soloist-api-key and run rspc pair",
+            "Soloist API key missing: save it in ~/.config/rspc/soloist-api-key and run rspc login",
         )?;
     ensure!(!key.trim().is_empty(), "Soloist API key file is empty");
     Ok(key.trim().into())
 }
+
 impl Soloist {
+    pub(crate) async fn authenticate(
+        &self,
+        session: &librespot_core::session::Session,
+    ) -> Result<()> {
+        let pid = self
+            .child
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(Child::id)
+            .context("Soloist is not running")?;
+        let port = tokio::task::spawn_blocking(move || discovery::port(pid)).await??;
+        let device =
+            tokio::fs::read_to_string(crate::paths::state().join("soloist/.device_id")).await?;
+        crate::spotify::connect_auth::authorize(session, port, device.trim(), self.logged_in())
+            .await?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !self.logged_in() {
+            ensure!(
+                !self.invalid() && Instant::now() < deadline,
+                "Soloist did not complete Spotify authorization; see soloist.log"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(())
+    }
+
     pub async fn connect(epoch: u64, tx: mpsc::UnboundedSender<AudioUpdate>) -> Result<Self> {
         let executable = binary();
         ensure!(
             executable.is_file(),
-            "Soloist is missing; run scripts/setup-soloist.sh"
+            "Soloist is missing; install spotify-soloist-bin (AUR), spotify-soloist (Homebrew cask), or use the rspc Nix package. See README.md for source installs."
         );
         let key = api_key()?;
         let data = crate::paths::state().join("soloist");
@@ -415,7 +482,18 @@ impl Soloist {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        // The first auth event can precede restoration of a saved session.
+        // Pairing still needs an unauthenticated receiver when no store exists.
+        if data.join("cache/dbrts").is_file() {
+            soloist.wait_for_restored_login().await;
+        }
         Ok(soloist)
+    }
+    async fn wait_for_restored_login(&self) {
+        let started = Instant::now();
+        while !self.logged_in() && !self.invalid() && started.elapsed() < COMMAND_TIMEOUT {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
     fn from_socket(
         epoch: u64,
@@ -638,7 +716,7 @@ impl Soloist {
     fn ensure_logged_in(&self) -> Result<()> {
         ensure!(
             self.logged_in(),
-            "Select rspc in Spotify's device menu to pair Soloist, then retry Play."
+            "Spotify audio is not authorized; run rspc login"
         );
         Ok(())
     }
@@ -760,6 +838,26 @@ impl Soloist {
         Ok(())
     }
     pub async fn seek(&self, position: u32) -> Result<()> {
+        // A play acknowledgement precedes the receiver's track-ready event.
+        // Seeking in that interval fails with seek_to_restricted, even for a
+        // seekable track. Keep the socket pump running while we wait for it.
+        let started = Instant::now();
+        loop {
+            let loading = {
+                let state = self.state.lock().unwrap();
+                state.request != 0
+                    && !state.ended
+                    && (!state.confirmed || state.awaiting_play || state.status == "loading")
+            };
+            if !loading {
+                break;
+            }
+            ensure!(
+                !self.invalid() && started.elapsed() < COMMAND_TIMEOUT,
+                "Spotify is still loading the selected track"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         self.send("seek", json!({"position_ms":position})).await
     }
     pub async fn skip(&self, previous: bool) -> Result<()> {

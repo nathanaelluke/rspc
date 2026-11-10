@@ -29,6 +29,7 @@ fn count(label: &str, kind: &str, total: usize) -> Info {
 fn songs<'a>(tracks: impl IntoIterator<Item = &'a TrackInfo>) -> Info {
     let mut artists = HashSet::new();
     let mut albums = HashSet::new();
+    let mut genres = HashSet::new();
     let mut count = 0;
     let mut duration_ms = 0;
     for track in tracks {
@@ -36,6 +37,7 @@ fn songs<'a>(tracks: impl IntoIterator<Item = &'a TrackInfo>) -> Info {
         duration_ms += track.duration_ms;
         artists.extend(&track.artists);
         albums.insert(&track.album);
+        genres.extend(&track.genres);
     }
     let seconds = duration_ms / 1000;
     let duration = if seconds >= 86400 {
@@ -61,7 +63,7 @@ fn songs<'a>(tracks: impl IntoIterator<Item = &'a TrackInfo>) -> Info {
         ("Total duration".into(), duration),
         ("Artists".into(), artists.len().to_string()),
         ("Albums".into(), albums.len().to_string()),
-        ("Genres".into(), "0".into()),
+        ("Genres".into(), genres.len().to_string()),
     ]
 }
 
@@ -84,17 +86,21 @@ impl Catalog {
             "artist" => {
                 // Release metadata is enough for a useful artist summary. Do not fetch
                 // thousands of tracks just to open an information popup.
-                let mut releases = HashSet::new();
-                let mut offset = 0;
-                loop {
-                    let page = self.artist_album_page(value, offset).await?;
-                    releases.extend(page.albums.into_iter().map(|album| album.uri));
-                    match page.next {
-                        Some(next) if next > offset => offset = next,
-                        _ => break,
+                let first = self.artist_album_page(value, 0).await?;
+                let total = if let Some(total) = first.total {
+                    total
+                } else {
+                    let mut releases: HashSet<_> =
+                        first.albums.into_iter().map(|album| album.uri).collect();
+                    let mut next = first.next;
+                    while let Some(offset) = next {
+                        let page = self.artist_album_page(value, offset).await?;
+                        releases.extend(page.albums.into_iter().map(|album| album.uri));
+                        next = page.next.filter(|next| *next > offset);
                     }
-                }
-                let mut info = count(value, "Releases", releases.len());
+                    releases.len()
+                };
+                let mut info = count(value, "Releases", total);
                 if let Some(cached) = self.cached_artist_tracks(value).await {
                     let local = self.local.all().await.ok();
                     info.extend(songs(

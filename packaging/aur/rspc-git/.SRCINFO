@@ -1,0 +1,24 @@
+pkgbase = rspc-git
+	pkgdesc = Terminal music player for Spotify, local files and streams
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/nathanaelluke/rspc
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	license = BSD-3-Clause
+	makedepends = cargo
+	makedepends = pkgconf
+	makedepends = git
+	depends = spotify-soloist-bin
+	depends = openssl
+	depends = gcc-libs
+	depends = glibc
+	optdepends = mpd: local files and internet radio
+	provides = rspc
+	conflicts = rspc
+	options = !lto
+	source = rspc::git+https://github.com/nathanaelluke/rspc.git#branch=main
+	sha256sums = SKIP
+
+pkgname = rspc-git

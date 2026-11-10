@@ -75,18 +75,33 @@ pub async fn run_daemon(options: DaemonOptions) -> Result<()> {
     if !options.demo {
         engine.watch_local();
     }
-    if !options.demo && crate::credentials_available()? {
+    if !options.demo {
         let catalog = Arc::clone(&engine.catalog);
         let notify = Arc::clone(&engine);
         tasks.spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             loop {
+                if !crate::credentials_available().unwrap_or(false) {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
                 let progress = catalog.warm().await;
                 if progress.changed {
                     notify.changed(vec!["database"]);
                 }
                 let delay = if progress.pending { 30 } else { 15 * 60 };
                 tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
+        });
+        tasks.spawn(async move {
+            let mut clock = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                clock.tick().await;
+                if crate::credentials_available().unwrap_or(false)
+                    && let Err(error) = crate::spotify::connection::maintain().await
+                {
+                    log::debug!("Spotify session maintenance: {error}");
+                }
             }
         });
     }

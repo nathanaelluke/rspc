@@ -6,7 +6,7 @@ use crate::{
     playback::{AudioEvent, AudioUpdate, Backend},
     soloist::Soloist,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -34,7 +34,7 @@ pub struct Player {
     pub stopped: bool,
     pub playing: bool,
     pub volume: u8,
-    pub demo_position: u64,
+    pub position_ms: u64,
     pub last_tick: Instant,
     pub pending_ids: Vec<u32>,
     pub error: String,
@@ -43,6 +43,37 @@ pub struct Player {
     external: bool,
     loading: Option<Instant>,
 }
+impl Player {
+    pub fn playback(&self) -> Playback {
+        let entry = self
+            .queue
+            .cursor()
+            .and_then(|i| self.queue.entries.get(i).cloned());
+        let position = self
+            .position_ms
+            .saturating_add(if self.playing && !self.stopped {
+                self.last_tick.elapsed().as_millis() as u64
+            } else {
+                0
+            });
+        Playback {
+            position_ms: if self.stopped {
+                0
+            } else {
+                match entry.as_ref().map_or(0, |e| e.track.duration_ms) {
+                    0 => position,
+                    duration => position.min(duration),
+                }
+            },
+            entry,
+            playing: self.playing && !self.stopped,
+            stopped: self.stopped,
+            volume: self.volume,
+            error: self.error.clone(),
+        }
+    }
+}
+
 pub struct Engine {
     pub catalog: Arc<Catalog>,
     pub art_cache: Mutex<HashMap<String, Arc<Vec<u8>>>>,
@@ -59,6 +90,21 @@ pub struct Engine {
     tx: mpsc::UnboundedSender<AudioUpdate>,
     dirty: AtomicBool,
 }
+
+enum PlayTarget {
+    Position(usize),
+    Id(u32),
+}
+
+impl PlayTarget {
+    fn index(&self, queue: &Queue) -> Result<usize> {
+        match *self {
+            Self::Position(index) => Ok(index),
+            Self::Id(id) => queue.index(id),
+        }
+    }
+}
+
 impl Engine {
     pub async fn new(
         demo: bool,
@@ -86,7 +132,7 @@ impl Engine {
                 stopped: true,
                 playing: false,
                 volume: 100,
-                demo_position: 0,
+                position_ms: 0,
                 last_tick: Instant::now(),
                 pending_ids: Vec::new(),
                 error: String::new(),
@@ -139,32 +185,7 @@ impl Engine {
         self.changed(vec!["player"]);
     }
     pub async fn playback(&self) -> Playback {
-        let p = self.player.lock().await;
-        let entry = p
-            .queue
-            .cursor()
-            .and_then(|i| p.queue.entries.get(i).cloned());
-        let position = p.demo_position
-            + if p.playing && !p.stopped {
-                p.last_tick.elapsed().as_millis() as u64
-            } else {
-                0
-            };
-        Playback {
-            position_ms: if p.stopped {
-                0
-            } else {
-                match entry.as_ref().map_or(0, |e| e.track.duration_ms) {
-                    0 => position,
-                    duration => position.min(duration),
-                }
-            },
-            entry,
-            playing: p.playing && !p.stopped,
-            stopped: p.stopped,
-            volume: p.volume,
-            error: p.error.clone(),
-        }
+        self.player.lock().await.playback()
     }
     async fn soloist(&self) -> Result<Arc<Soloist>> {
         if let Some(n) = self.soloist.read().await.as_ref().filter(|n| !n.invalid()) {
@@ -234,25 +255,49 @@ impl Engine {
     pub async fn prepare_audio(&self) -> Result<String> {
         Ok(self.soloist().await?.diagnostics())
     }
+    pub async fn login_spotify(&self) -> Result<String> {
+        let _control = self.control.lock().await;
+        ensure!(
+            !self.catalog.demo,
+            "Spotify login is unavailable in demo mode"
+        );
+        let session = crate::spotify::connection::catalog_for_pairing().await?;
+        self.soloist().await?.authenticate(&session).await?;
+        crate::spotify::connection::check_pairing().await?;
+        Ok("spotify_login: verified\n".into())
+    }
     pub async fn play(&self, index: usize) -> Result<()> {
-        let result = self.play_entry(index).await;
+        self.play_target(PlayTarget::Position(index)).await
+    }
+
+    pub async fn play_id(&self, id: u32) -> Result<()> {
+        self.play_target(PlayTarget::Id(id)).await
+    }
+
+    async fn play_target(&self, target: PlayTarget) -> Result<()> {
+        let _control = self.control.lock().await;
+        let result = self.play_inner(target).await;
         if let Err(error) = &result {
             self.player.lock().await.error = format!("{error:#}");
             self.changed(vec!["player"]);
         }
         result
     }
-    async fn play_entry(&self, index: usize) -> Result<()> {
-        let _control = self.control.lock().await;
-        let (entry, previous, volume) = {
+    // Playback and queue mutations share the control lock. State reads only
+    // need the short-lived player lock, even while a backend is connecting.
+    async fn play_inner(&self, target: PlayTarget) -> Result<()> {
+        let (entry, sync_spotify_volume, volume) = {
             let p = self.player.lock().await;
+            let index = target.index(&p.queue)?;
             (
                 p.queue
                     .entries
                     .get(index)
                     .context("queue position out of range")?
                     .clone(),
-                p.backend,
+                // Deferred paused selections have no active backend, but keep
+                // the shared volume when their replacement is finally loaded.
+                p.backend == Some(Backend::Mpd) || (!p.stopped && p.backend.is_none()),
                 p.volume,
             )
         };
@@ -267,7 +312,7 @@ impl Engine {
                 Backend::Spotify => {
                     let player = self.soloist().await?;
                     let request = player.reserve(uri, entry.track.duration_ms)?;
-                    if previous == Some(Backend::Mpd) {
+                    if sync_spotify_volume {
                         player.volume(volume).await?;
                     }
                     if let Some(local) = self.local_audio.read().await.as_ref() {
@@ -292,7 +337,7 @@ impl Engine {
             p.queue.current = Some(entry.id);
             p.stopped = false;
             p.playing = self.catalog.demo;
-            p.demo_position = 0;
+            p.position_ms = 0;
             p.last_tick = Instant::now();
             p.loading = (!self.catalog.demo).then(Instant::now);
             p.error.clear();
@@ -319,18 +364,31 @@ impl Engine {
         Ok(())
     }
     pub async fn pause(&self, paused: Option<bool>) -> Result<()> {
-        let control = self.control.lock().await;
+        let _control = self.control.lock().await;
+        let result = self.pause_inner(paused).await;
+        if let Err(error) = &result {
+            self.player.lock().await.error = format!("{error:#}");
+            self.changed(vec!["player"]);
+        }
+        result
+    }
+
+    async fn pause_inner(&self, paused: Option<bool>) -> Result<()> {
         let state = self.playback().await;
         let pause = paused.unwrap_or(state.playing);
-        if !pause && state.stopped {
-            let index = self.player.lock().await.queue.cursor().unwrap_or(0);
-            drop(control);
-            return self.play(index).await;
-        }
         let (backend, request) = {
             let p = self.player.lock().await;
             (p.backend, p.request)
         };
+        if !pause && (state.stopped || backend.is_none()) {
+            let index = self.player.lock().await.queue.cursor().unwrap_or(0);
+            self.play_inner(PlayTarget::Position(index)).await?;
+            if !state.stopped && state.position_ms > 0 {
+                self.seek_inner(state.position_ms as f64 / 1000.0, false)
+                    .await?;
+            }
+            return Ok(());
+        }
         match backend {
             Some(Backend::Mpd) => {
                 let local = self.local_audio.read().await.clone();
@@ -355,7 +413,7 @@ impl Engine {
             && p.request == request
             && p.queue.current == state.entry.as_ref().map(|entry| entry.id)
         {
-            p.demo_position = latest.position_ms;
+            p.position_ms = latest.position_ms;
             p.last_tick = Instant::now();
             p.playing = !pause;
         }
@@ -377,7 +435,7 @@ impl Engine {
             p.request = None;
             p.external = false;
             p.backend = None;
-            p.demo_position = 0;
+            p.position_ms = 0;
             p.pending_ids.clear();
         }
         let soloist = self.soloist.read().await.clone();
@@ -392,10 +450,6 @@ impl Engine {
         }
         self.changed(vec!["player"]);
     }
-    async fn fail(&self, error: String) {
-        let _control = self.control.lock().await;
-        self.fail_inner(error).await;
-    }
     async fn fail_inner(&self, error: String) {
         self.stop_inner().await;
         self.player.lock().await.error = error;
@@ -404,6 +458,40 @@ impl Engine {
     pub async fn seek(&self, seconds: f64, relative: bool) -> Result<()> {
         anyhow::ensure!(seconds.is_finite(), "invalid seek position");
         let _control = self.control.lock().await;
+        self.seek_inner(seconds, relative).await
+    }
+
+    pub async fn seek_id(&self, id: u32, seconds: f64) -> Result<()> {
+        self.seek_target(PlayTarget::Id(id), seconds).await
+    }
+
+    pub async fn seek_position(&self, index: usize, seconds: f64) -> Result<()> {
+        self.seek_target(PlayTarget::Position(index), seconds).await
+    }
+
+    async fn seek_target(&self, target: PlayTarget, seconds: f64) -> Result<()> {
+        anyhow::ensure!(seconds.is_finite(), "invalid seek position");
+        let _control = self.control.lock().await;
+        let id = {
+            let p = self.player.lock().await;
+            let entry = p
+                .queue
+                .entries
+                .get(target.index(&p.queue)?)
+                .context("queue position out of range")?;
+            anyhow::ensure!(
+                entry.track.duration_ms > 0,
+                "this source has no known seekable duration"
+            );
+            (p.queue.current != Some(entry.id)).then_some(entry.id)
+        };
+        if let Some(id) = id {
+            self.play_inner(PlayTarget::Id(id)).await?;
+        }
+        self.seek_inner(seconds, false).await
+    }
+
+    async fn seek_inner(&self, seconds: f64, relative: bool) -> Result<()> {
         let state = self.playback().await;
         let duration = state.entry.as_ref().map_or(0, |e| e.track.duration_ms);
         anyhow::ensure!(duration > 0, "this source has no known seekable duration");
@@ -438,7 +526,7 @@ impl Engine {
             && p.request == request
             && p.queue.current == state.entry.as_ref().map(|entry| entry.id)
         {
-            p.demo_position = ms;
+            p.position_ms = ms;
             p.last_tick = Instant::now();
         }
         drop(p);
@@ -446,8 +534,11 @@ impl Engine {
         Ok(())
     }
     pub async fn volume(&self, value: i64, relative: bool) {
+        let _control = self.control.lock().await;
         let mut p = self.player.lock().await;
-        p.volume = (value + if relative { i64::from(p.volume) } else { 0 }).clamp(0, 100) as u8;
+        p.volume = value
+            .saturating_add(if relative { i64::from(p.volume) } else { 0 })
+            .clamp(0, 100) as u8;
         let volume = p.volume;
         let backend = p.backend;
         drop(p);
@@ -470,6 +561,16 @@ impl Engine {
         self.changed(vec!["mixer"]);
     }
     pub async fn next(&self, previous: bool) -> Result<()> {
+        let _control = self.control.lock().await;
+        let result = self.next_inner(previous).await;
+        if let Err(error) = &result {
+            self.player.lock().await.error = format!("{error:#}");
+            self.changed(vec!["player"]);
+        }
+        result
+    }
+
+    async fn next_inner(&self, previous: bool) -> Result<()> {
         if self.player.lock().await.external {
             // Spotify owns a context started from a phone or restored session.
             // Keep its next/previous controls until the user selects an rspc entry.
@@ -493,9 +594,9 @@ impl Engine {
             (next, p.queue.current)
         };
         if let Some(i) = next {
-            self.play(i).await?;
+            self.play_inner(PlayTarget::Position(i)).await?;
         } else {
-            self.stop().await;
+            self.stop_inner().await;
         }
         if !previous {
             let mut p = self.player.lock().await;
@@ -508,15 +609,71 @@ impl Engine {
         }
         Ok(())
     }
+
+    pub async fn clear_queue(&self) {
+        let _control = self.control.lock().await;
+        self.stop_inner().await;
+        {
+            let mut player = self.player.lock().await;
+            player.queue.entries.clear();
+            player.queue.current = None;
+            player.queue.changed();
+        }
+        self.queue_changed().await;
+    }
+
+    pub async fn edit_queue<T>(&self, edit: impl FnOnce(&mut Queue) -> Result<T>) -> Result<T> {
+        let _control = self.control.lock().await;
+        let (value, changed_current, current, stopped, paused) = {
+            let mut p = self.player.lock().await;
+            let old = p.queue.current;
+            let value = edit(&mut p.queue)?;
+            (
+                value,
+                old != p.queue.current,
+                p.queue.current,
+                p.stopped,
+                !p.playing && p.loading.is_none(),
+            )
+        };
+        let transition = if changed_current {
+            match current.filter(|_| !stopped) {
+                Some(_) if paused => {
+                    // Selecting a replacement must not briefly start audio.
+                    // Resume will load it and apply any seek made while paused.
+                    self.stop_inner().await;
+                    self.player.lock().await.stopped = false;
+                    self.changed(vec!["player"]);
+                    Ok(())
+                }
+                Some(id) => self.play_inner(PlayTarget::Id(id)).await,
+                None => {
+                    self.stop_inner().await;
+                    Ok(())
+                }
+            }
+        } else {
+            Ok(())
+        };
+        if let Err(error) = &transition {
+            self.fail_inner(format!("{error:#}")).await;
+        }
+        // Persist edits even when the replacement track cannot start.
+        self.queue_changed().await;
+        transition?;
+        Ok(value)
+    }
     pub async fn queue_changed(&self) {
         self.sync_pending().await;
         self.mark_dirty();
         self.changed(vec!["playlist"]);
     }
+    #[cfg(test)]
     async fn finished(&self) -> Result<()> {
+        let _control = self.control.lock().await;
         let result = self.finish_queue().await;
         if let Err(error) = &result {
-            self.fail(format!("{error:#}")).await;
+            self.fail_inner(format!("{error:#}")).await;
         }
         result
     }
@@ -527,9 +684,9 @@ impl Engine {
         };
         if single != 0 {
             if repeat {
-                self.play(index).await?;
+                self.play_inner(PlayTarget::Position(index)).await?;
             } else {
-                self.stop().await;
+                self.stop_inner().await;
                 let mut p = self.player.lock().await;
                 let old = p.queue.current;
                 p.queue.consume_finished(old);
@@ -541,7 +698,7 @@ impl Engine {
                 self.changed(vec!["options", "player", "playlist"]);
             }
         } else {
-            self.next(false).await?;
+            self.next_inner(false).await?;
         }
         Ok(())
     }
@@ -551,18 +708,30 @@ impl Engine {
             self.changed(vec!["database", "stored_playlist", "update"]);
             return Ok(());
         }
-        // Initial snapshots and volume/auth changes arrive before any local Play.
-        // Still reject events from an old player after reconnect/replacement.
         if backend == Backend::Spotify && self.soloist_epoch.load(Ordering::Relaxed) != epoch {
             return Ok(());
         }
-        let _control = if backend == Backend::Spotify
+        if matches!(event, AudioEvent::Inactive) {
+            let player = self.player.lock().await;
+            if player.stopped || player.loading.is_some() || player.backend == Some(Backend::Mpd) {
+                return Ok(());
+            }
+        }
+        let _control = if matches!(
+            event,
+            AudioEvent::Ended { .. } | AudioEvent::Error(_) | AudioEvent::Inactive
+        ) || backend == Backend::Spotify
             && matches!(event, AudioEvent::ExternalState { playing: true, .. })
         {
             Some(self.control.lock().await)
         } else {
             None
         };
+        // Check after acquiring control: a replacement player may have started
+        // while this event was waiting behind another transition.
+        if backend == Backend::Spotify && self.soloist_epoch.load(Ordering::Relaxed) != epoch {
+            return Ok(());
+        }
         let mut p = self.player.lock().await;
         if backend == Backend::Mpd && (p.backend != Some(Backend::Mpd) || p.request != Some(epoch))
         {
@@ -644,7 +813,7 @@ impl Engine {
                 p.pending_ids.clear();
                 p.stopped = stopped;
                 p.playing = playing && !stopped;
-                p.demo_position = position;
+                p.position_ms = position;
                 p.last_tick = Instant::now();
                 p.error.clear();
                 if queue_changed && !added {
@@ -673,7 +842,7 @@ impl Engine {
                 playing,
             } if p.request == Some(request) => {
                 let first = playing && p.loading.is_some();
-                p.demo_position = position;
+                p.position_ms = position;
                 p.last_tick = Instant::now();
                 p.playing = playing;
                 if playing {
@@ -696,18 +865,21 @@ impl Engine {
             AudioEvent::Position { request, position }
                 if p.request == Some(request) || (request == 0 && p.external && !p.stopped) =>
             {
-                p.demo_position = position;
+                p.position_ms = position;
                 p.last_tick = Instant::now();
             }
             AudioEvent::Ended { request }
                 if p.request == Some(request) && !p.stopped && p.loading.is_none() =>
             {
                 drop(p);
-                self.finished().await?;
+                if let Err(error) = self.finish_queue().await {
+                    self.fail_inner(format!("{error:#}")).await;
+                    return Err(error);
+                }
             }
             AudioEvent::Error(error) => {
                 drop(p);
-                self.fail(format!(
+                self.fail_inner(format!(
                     "{}: {error}",
                     if backend == Backend::Spotify {
                         "Soloist"
@@ -756,14 +928,18 @@ impl Engine {
             _ => {}
         }
         if self.catalog.demo {
+            let _control = self.control.lock().await;
             let s = self.playback().await;
             if s.playing
                 && s.entry
                     .is_some_and(|e| s.position_ms >= e.track.duration_ms)
+                && let Err(error) = self.finish_queue().await
             {
-                self.finished().await?;
+                self.fail_inner(format!("{error:#}")).await;
+                return Err(error);
             }
         } else {
+            let _control = self.control.lock().await;
             let timeout = self
                 .player
                 .lock()
@@ -771,7 +947,7 @@ impl Engine {
                 .loading
                 .is_some_and(|at| at.elapsed() > Duration::from_secs(20));
             if timeout {
-                self.fail("Audio did not start within 20 seconds. Check rspc doctor; retry play to reconnect.".into()).await;
+                self.fail_inner("Audio did not start within 20 seconds. Check rspc doctor; retry play to reconnect.".into()).await;
             }
         }
         Ok(())
@@ -797,6 +973,7 @@ impl Engine {
             None => "none",
         };
         let queue_control = if p.external { "spotify" } else { "rspc" };
+        let catalog_auth = crate::spotify::connection::description();
         let request = p.request.unwrap_or(0);
         drop(p);
         let n = self.soloist.read().await;
@@ -812,7 +989,7 @@ impl Engine {
             .map(|p| p.diagnostics())
             .unwrap_or_else(|| "mpd_connected: 0\n".into());
         format!(
-            "engine: rspc\nactive_source: {active}\nqueue_control: {queue_control}\nplayer_request: {request}\nloading: {}\n{}{local}error: {error}\n",
+            "engine: rspc\nactive_source: {active}\nqueue_control: {queue_control}\ncatalog_auth: {catalog_auth}\nplayer_request: {request}\nloading: {}\n{}{local}error: {error}\n",
             u8::from(loading),
             detail
         )

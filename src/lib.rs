@@ -6,16 +6,32 @@ mod playback;
 mod soloist;
 mod spotify;
 pub use daemon::{DaemonOptions, run_daemon};
-pub fn credentials_available() -> anyhow::Result<bool> {
-    spotify::credentials::available()
+/// Identify the owned player's Connect socket without inspecting its command line.
+pub fn pairing_port(pid: u32) -> anyhow::Result<u16> {
+    soloist::discovery::port(pid)
 }
-pub async fn login() -> anyhow::Result<()> {
-    let login = spotify::credentials::begin_login().await?;
+pub fn credentials_available() -> anyhow::Result<bool> {
+    spotify::login::available()
+}
+pub async fn catalog_login() -> anyhow::Result<()> {
+    let login = spotify::login::begin_login().await?;
     println!("Open {} and enter {}", login.url(), login.code());
     let credentials = login.finish().await?;
-    spotify::session::log_in(credentials)
+    spotify::connection::log_in(credentials)
         .await
-        .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+        .map_err(anyhow::Error::from)?;
     println!("Spotify login saved.");
+    Ok(())
+}
+/// One interactive catalog authorization also authorizes the audio receiver.
+pub async fn ensure_catalog_login() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        soloist::binary().is_file(),
+        "Soloist is missing; install spotify-soloist-bin (AUR), spotify-soloist (Homebrew cask), or use the rspc Nix package. See README.md for source installs."
+    );
+    let _ = soloist::api_key()?;
+    if !spotify::login::catalog_available()? {
+        catalog_login().await?;
+    }
     Ok(())
 }

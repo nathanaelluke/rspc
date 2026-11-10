@@ -74,6 +74,17 @@ fn now() -> u64 {
         .as_secs()
 }
 
+fn account_namespace(account: Option<&str>) -> String {
+    match account {
+        Some(account) => openssl::sha::sha256(account.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        // An unknown account must never inherit another receiver's disk pages.
+        None => uuid::Uuid::new_v4().to_string(),
+    }
+}
+
 pub struct Catalog {
     pub playlist_settings: std::sync::Mutex<crate::config::PlaylistSettings>,
     pub local: Arc<super::local::Library>,
@@ -105,11 +116,28 @@ pub struct Catalog {
 }
 impl Catalog {
     pub fn new(demo: bool) -> Self {
+        #[cfg(not(test))]
+        let account = (!demo)
+            .then(crate::spotify::login::cached_account)
+            .flatten();
+        #[cfg(test)]
+        let account: Option<String> = None;
+        let disk_root = crate::paths::cache()
+            .join("catalog-v2")
+            .join(account_namespace(account.as_deref()));
+        let versions = if demo {
+            HashMap::new()
+        } else {
+            std::fs::read(disk_root.join("catalog-versions.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default()
+        };
         Self {
             playlist_settings: std::sync::Mutex::new(Default::default()),
             local: Arc::new(super::local::Library::new()),
             demo,
-            disk_root: crate::paths::cache().join("catalog-v2"),
+            disk_root,
             tag_cache: Mutex::new(HashMap::new()),
             playlist_fetched: Mutex::new(None),
             artist_views: Mutex::new(HashMap::new()),
@@ -118,14 +146,7 @@ impl Catalog {
             people_cache: Mutex::new(None),
             next_request: Mutex::new(std::time::Instant::now()),
             cooldown: Mutex::new(None),
-            versions: std::sync::Mutex::new(if demo {
-                HashMap::new()
-            } else {
-                std::fs::read(crate::paths::cache().join("catalog-versions.json"))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or_default()
-            }),
+            versions: std::sync::Mutex::new(versions),
             demo_playlists: Mutex::new(BTreeMap::from([("Demo Mix".into(), demo_tracks())])),
             tracks: Mutex::new(HashMap::new()),
             albums: Mutex::new(HashMap::new()),
@@ -145,9 +166,7 @@ impl Catalog {
     fn disk(&self, key: &str) -> std::path::PathBuf {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hash);
-        self.disk_root
-            .clone()
-            .join(format!("{:016x}.json", hash.finish()))
+        self.disk_root.join(format!("{:016x}.json", hash.finish()))
     }
     pub async fn invalidate(self: &Arc<Self>) {
         self.local.invalidate().await;
@@ -245,6 +264,7 @@ impl Catalog {
                 self.content_revision.fetch_add(1, Ordering::Relaxed);
             }
             cache_insert(&mut cache, key.to_owned(), entry.clone());
+            drop(cache);
             if matches!(path, "me/albums" | "me/tracks" | "me/following") {
                 self.tag_cache.lock().await.clear();
             }
@@ -252,7 +272,6 @@ impl Catalog {
             if path == "me/tracks" || path.starts_with("playlists/") && path.ends_with("/tracks") {
                 self.invalidate_playlist_view(path).await;
             }
-            drop(cache);
             let catalog = Arc::clone(self);
             let key = key.to_owned();
             tokio::spawn(async move {
@@ -857,6 +876,7 @@ impl Catalog {
         let filters = filter::parse(query)?;
         let mut values = std::collections::BTreeSet::new();
         match tag.to_lowercase().as_str() {
+            "genre" => {} // Spotify has no per-track genre tag; local MPD provides it.
             "artist" if filters.is_empty() => {
                 for (_, name) in self.artists().await? {
                     values.insert(name);
@@ -924,6 +944,7 @@ pub fn track_from_json(v: &Value) -> Option<TrackInfo> {
         .collect();
     Some(TrackInfo {
         uri: Some(uri),
+        genres: Vec::new(),
         name: v["name"].as_str()?.into(),
         artists: artists.iter().map(|a| a.name.clone()).collect(),
         album_artists: v["album"]["artists"]

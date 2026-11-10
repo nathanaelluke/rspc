@@ -43,6 +43,12 @@ impl Default for Settings {
 }
 impl Settings {
     fn discover() -> Self {
+        if cfg!(test) {
+            return Self {
+                address: format!("/tmp/rspc-offline-{}.sock", uuid::Uuid::new_v4()),
+                password: None,
+            };
+        }
         let file = std::env::var_os("RSPC_MPD_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -244,6 +250,11 @@ pub fn tracks(bytes: &[u8]) -> Vec<TrackInfo> {
                     .map(|(_, v)| v.clone())
                     .collect(),
                 album: get("Album").unwrap_or_default().into(),
+                genres: r
+                    .iter()
+                    .filter(|(key, _)| key.eq_ignore_ascii_case("Genre"))
+                    .map(|(_, value)| value.clone())
+                    .collect(),
                 duration_ms: (duration * 1000.0) as u64,
                 id: None,
                 album_id: None,

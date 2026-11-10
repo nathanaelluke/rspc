@@ -305,16 +305,7 @@ impl Modal for KeybindsModal {
             Layout::horizontal(constraints).spacing(2).areas(table_area);
 
         let keybinds = &ctx.config.keybinds;
-        let header_style = ctx
-            .config
-            .theme
-            .highlighted_item_style
-            .add_modifier(ratatui::style::Modifier::BOLD)
-            .bg(ctx
-                .config
-                .theme
-                .modal_background_color
-                .unwrap_or(ratatui::style::Color::Reset));
+        let header_style = ctx.config.theme.highlighted_item_style;
 
         let global = keybinds.global.sort_by_action().collect_vec();
         let navigation = keybinds.navigation.sort_by_action().collect_vec();
@@ -385,19 +376,10 @@ impl Modal for KeybindsModal {
                 .border_style(ctx.config.as_border_style()),
         );
 
-        let table =
-            Table::new(rows, constraints)
-                .column_spacing(2)
-                .style(ctx.config.as_text_style())
-                .row_highlight_style(ctx.config.theme.keybinds_selection_style.unwrap_or_else(
-                    || {
-                        ctx.config.theme.current_item_style.bg(ctx
-                            .config
-                            .theme
-                            .background_color
-                            .unwrap_or(ratatui::style::Color::Reset))
-                    },
-                ));
+        let table = Table::new(rows, constraints)
+            .column_spacing(2)
+            .style(ctx.config.as_text_style())
+            .row_highlight_style(ctx.config.theme.current_item_style);
 
         self.table_area = table_area;
 
@@ -563,7 +545,6 @@ mod tests {
         config.theme.background_color = Some(Color::Rgb(16, 16, 16));
         config.theme.modal_background_color = Some(Color::Rgb(30, 30, 30));
         config.theme.current_item_style = Style::default().bg(Color::Rgb(58, 58, 58));
-        config.theme.keybinds_selection_style = Some(Style::default().bg(Color::Rgb(58, 58, 58)));
         let mut modal = KeybindsModal::new(&mut ctx);
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("test terminal");
         terminal

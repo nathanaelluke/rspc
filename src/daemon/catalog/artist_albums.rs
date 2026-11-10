@@ -39,7 +39,10 @@ impl Catalog {
             return Ok(view.page.clone());
         }
         let Some(id) = self.artist_id(name).await? else {
-            return Ok(ArtistAlbumPage::default());
+            return Ok(ArtistAlbumPage {
+                total: Some(0),
+                ..Default::default()
+            });
         };
         let epoch = self.artist_view_epoch.load(Ordering::Relaxed);
         let page = self
@@ -52,6 +55,9 @@ impl Catalog {
             )
             .await?;
         let albums = page["items"].as_array().context("missing artist albums")?;
+        let total = page["total"]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok());
         let next = page["next"].is_string().then_some(offset + PAGE_SIZE);
         ensure!(
             next.is_none_or(|offset| offset < 100_000),
@@ -70,6 +76,7 @@ impl Catalog {
         let page = ArtistAlbumPage {
             albums: result,
             next,
+            total,
         };
         let mut views = self.artist_pages.lock().await;
         if epoch == self.artist_view_epoch.load(Ordering::Relaxed) {
@@ -114,6 +121,7 @@ impl Catalog {
                     vec![]
                 },
                 next: None,
+                total: Some(if offset == 0 { demo_albums().len() } else { 0 }),
             });
         }
         let local = async {
@@ -152,6 +160,7 @@ impl Catalog {
             Err(_) if !local_albums.is_empty() => ArtistAlbumPage::default(),
             Err(error) => return Err(error),
         };
+        page.total = page.total.map(|total| total + local_albums.len());
         page.albums.extend(local_albums.into_values());
         Ok(page)
     }

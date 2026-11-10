@@ -102,6 +102,7 @@ fn visit_values(track: &TrackInfo, tag: &str, mut visit: impl FnMut(&str)) -> Re
             artists.iter().for_each(|value| visit(value));
         }
         "album" => visit(&track.album),
+        "genre" => track.genres.iter().for_each(|value| visit(value)),
         "title" => visit(&track.name),
         "file" | "filename" => visit(track.uri.as_deref().unwrap_or_default()),
         "date" | "originaldate" => visit(track.release_date.as_deref().unwrap_or_default()),
@@ -111,6 +112,7 @@ fn visit_values(track: &TrackInfo, tag: &str, mut visit: impl FnMut(&str)) -> Re
             visit(&track.album);
             visit(track.uri.as_deref().unwrap_or_default());
             track.artists.iter().for_each(|value| visit(value));
+            track.genres.iter().for_each(|value| visit(value));
         }
         _ => bail!("Spotify does not expose the requested tag: {tag}"),
     }

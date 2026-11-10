@@ -1,4 +1,18 @@
 use super::*;
+
+#[test]
+fn local_genres_survive_parsing_filtering_and_protocol_roundtrips() {
+    let tracks = tracks(b"file: jazz.flac\nTitle: Fixture\nGenre: Jazz\nGenre: Fusion\n");
+    assert_eq!(tracks[0].genres, ["Jazz", "Fusion"]);
+    let filters = crate::daemon::filter::parse("(Genre == 'Fusion')").unwrap();
+    assert!(crate::daemon::filter::matches(&tracks[0], &filters, false).unwrap());
+    let entry = crate::daemon::queue::Entry {
+        id: 1,
+        track: tracks[0].clone(),
+    };
+    let reply = crate::daemon::protocol::song(&entry, Some(0));
+    assert!(reply.contains("Genre: Jazz\nGenre: Fusion\n"));
+}
 #[test]
 fn quoting_roundtrips_paths_and_rejects_command_injection() {
     let name = "音楽/A \"song\"\\mix.flac";

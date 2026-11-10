@@ -1,9 +1,15 @@
 # Build and development files
 target/
-/.cargo/
+/.cargo/*
+!/.cargo/audit.toml
 /.direnv/
 /result
 /result-*
+/dist/
+/package-recipes/
+/packaging/aur/*/src/
+/packaging/aur/*/pkg/
+/packaging/aur/*/*.pkg.tar.*
 __pycache__/
 *.pyc
 *.swp
@@ -24,7 +30,12 @@ queue.json
 demo-queue.json
 recent.json
 catalog-versions.json
+spotify-public-session.json
+soloist-refresh-recovery.json
+.device_id
+dbrts
 soloist/
+!/src/soloist/
 streaming_cache/
 catalog-v2/
 soloist-package

@@ -4,11 +4,27 @@ permissions:
   contents: read
 
 jobs:
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit dependencies
+        run: |
+          curl --fail --location --retry 3 --output audit.tar.gz \
+            https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz
+          echo '7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428  audit.tar.gz' | sha256sum --check
+          tar -xzf audit.tar.gz
+          ./cargo-audit-x86_64-unknown-linux-musl-v0.22.2/cargo-audit audit --deny unsound
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
       CARGO_BUILD_JOBS: 2
+      RUST_TEST_THREADS: 1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -22,13 +38,63 @@ jobs:
           rustup default stable
           rustup component add clippy rustfmt
       - run: cargo fmt --all -- --check
-      - run: cargo test --locked -j2 --workspace
       - run: cargo clippy --locked -j2 --workspace --all-targets -- -D warnings
       - run: cargo build --release --locked -j2 -p rspc -p rspc-ui
-      - name: Process and release checks
+      - run: cargo test --locked -j2 --workspace
+      - run: cargo run --locked -j2 -p xtask -- check-release --history
+
+  portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUST_TEST_THREADS: 1
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
-          python3 tests/test_daemon.py
-          python3 tests/test_mixed_sources.py
-          python3 tests/test_pair_on_lan.py
-          python3 tests/test_release_check.py
-          python3 scripts/check-release.py --history
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev mpd
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install pkgconf openssl@3 mpd
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - name: Check native build
+        run: |
+          rustup update stable --profile minimal
+          rustup default stable
+          cargo build --release --locked -j2 -p rspc -p rspc-ui
+          cargo test --locked -j2 --workspace
+
+  nix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31
+        with:
+          extra_nix_config: |
+            max-jobs = 1
+            cores = 1
+      - name: Build and check installed executables
+        run: |
+          nix build .#rspc --max-jobs 1 --cores 1
+          ./result/bin/rspc --version
+          ./result/bin/rspc-ui --version
+          player=$(nix build .#soloist --no-link --print-out-paths)
+          "$player/bin/soloist" --version
+      - name: Evaluate ARM and macOS packages
+        run: |
+          nix eval --raw .#packages.aarch64-linux.rspc.drvPath
+          nix eval --raw .#packages.aarch64-darwin.rspc.drvPath

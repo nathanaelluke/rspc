@@ -1,0 +1,43 @@
+# Build the current rspc sources; Soloist stays a separate AUR dependency.
+pkgname=rspc-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Terminal music player for Spotify, local files and streams'
+arch=('x86_64' 'aarch64')
+url='https://github.com/nathanaelluke/rspc'
+license=('MIT' 'BSD-3-Clause')
+depends=('spotify-soloist-bin' 'openssl' 'gcc-libs' 'glibc')
+makedepends=('cargo' 'pkgconf' 'git')
+optdepends=('mpd: local files and internet radio')
+provides=('rspc')
+conflicts=('rspc')
+source=('rspc::git+https://github.com/nathanaelluke/rspc.git#branch=main')
+sha256sums=('SKIP')
+options=('!lto')
+
+prepare() {
+  cd "$srcdir/rspc"
+  export CARGO_HOME="$srcdir/cargo-home"
+  cargo fetch --locked
+}
+
+pkgver() {
+  cd "$srcdir/rspc"
+  local version
+  version=$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$srcdir/rspc"
+  export CARGO_HOME="$srcdir/cargo-home"
+  cargo build --release --frozen -j1 -p rspc -p rspc-ui
+}
+
+package() {
+  cd "$srcdir/rspc"
+  DESTDIR="$pkgdir" ./scripts/install.sh --prefix /usr
+  install -d "$pkgdir/usr/lib/systemd/user"
+  sed 's|^ExecStart=.*|ExecStart=/usr/bin/rspc daemon|' packaging/rspc.service \
+    > "$pkgdir/usr/lib/systemd/user/rspc.service"
+}

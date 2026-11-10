@@ -79,7 +79,7 @@ impl Catalog {
             serde_json::to_vec(&*versions)?
         };
         self.invalidate_playlist_view(path).await;
-        let file = self.disk_root.with_file_name("catalog-versions.json");
+        let file = self.disk_root.join("catalog-versions.json");
         tokio::task::spawn_blocking(move || crate::paths::write_private_file_atomic(&file, &bytes))
             .await??;
         self.cache
