@@ -1,4 +1,4 @@
-# Build the current rspc sources; Soloist stays a separate AUR dependency.
+# Build the current rspc sources. Soloist stays a separate AUR dependency.
 pkgname=rspc-git
 pkgver=0.1.0
 pkgrel=1

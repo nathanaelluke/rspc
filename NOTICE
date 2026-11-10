@@ -10,14 +10,14 @@ HTTP handler and Connect authorization exchange are rspc implementations.
 
 librespot-core, librespot-metadata and librespot-protocol 0.8.0 provide session
 negotiation, metadata and protocol types. They are copyright (c) 2015 Paul Lietar
-and contributors, under MIT; see LICENSE-librespot. The schema in
+and contributors, under MIT. See LICENSE-librespot. The schema in
 protocol/collection.proto comes from librespot's collection2v2.proto. The manual
 pairing reader's storage scrambling follows librespot's legacy credential
 format. Other crates retain their own distributed licenses. rspc does not link
 librespot's playback, discovery or Connect engines.
 
 Spotify Soloist is an external player installed as a separate dependency.
-Homebrew and AUR use their existing packages; Nix fetches Spotify's official
+Homebrew and AUR use their existing packages. Nix fetches Spotify's official
 archive and adjusts Linux loader and audio-library paths locally. Soloist,
 user API keys and pairing state are not included in rspc's release archives.
 Spotify supplies the player's terms, expiry policy and third-party notices:
