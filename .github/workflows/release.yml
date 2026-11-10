@@ -85,6 +85,7 @@ jobs:
   assemble:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       contents: write
     steps:
@@ -117,7 +118,11 @@ jobs:
           unpacked=$(mktemp -d)
           tar -xzf "dist/rspc-$version-source.tar.gz" -C "$unpacked"
           cd "$unpacked/rspc-$version"
-          CARGO_HOME=$(mktemp -d) cargo metadata --locked --offline --format-version 1 > "$RUNNER_TEMP/source-metadata.json"
+          export CARGO_HOME=$(mktemp -d)
+          cargo metadata --locked --offline --format-version 1 > "$RUNNER_TEMP/source-metadata.json"
+          cargo build --locked --offline --release -j2 -p rspc -p rspc-ui
+          ./target/release/rspc --version
+          ./target/release/rspc-ui version
           test -s packaging/LICENSE-THIRD-PARTY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
