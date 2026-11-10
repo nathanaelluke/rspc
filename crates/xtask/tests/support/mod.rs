@@ -121,6 +121,12 @@ pub struct Harness {
     pub daemon: Option<Process>,
     pub mpd: Option<Process>,
 }
+
+pub enum TuiStep<'a> {
+    Key(&'a [u8]),
+    WaitFor(&'a [u8]),
+}
+
 impl Harness {
     pub fn isolated(demo: bool) -> Result<Self> {
         ensure!(
@@ -255,6 +261,11 @@ impl Harness {
         Ok(())
     }
     pub fn tui(&self, keys: &[&[u8]], hangup: bool) -> Result<Vec<u8>> {
+        let steps: Vec<_> = keys.iter().map(|key| TuiStep::Key(key)).collect();
+        self.tui_steps(&steps, hangup)
+    }
+
+    pub fn tui_steps(&self, steps: &[TuiStep<'_>], hangup: bool) -> Result<Vec<u8>> {
         let mut master = -1;
         let mut slave = -1;
         let mut size = libc::winsize {
@@ -316,7 +327,10 @@ impl Harness {
         drop(command);
         let start = Instant::now();
         let deadline = start + Duration::from_secs(12);
-        let mut bytes = Vec::new();
+        let mut terminal = vt100::Parser::new(size.ws_row, size.ws_col, 0);
+        let mut screen = String::new();
+        let mut frames = Vec::new();
+        let mut output_bytes = 0;
         let mut populated = None;
         let mut next = None;
         let mut index = 0;
@@ -334,9 +348,16 @@ impl Harness {
                     Ok(0) => break,
                     Ok(count) => {
                         let chunk = &buffer[..count];
-                        bytes.extend_from_slice(chunk);
+                        output_bytes += count;
+                        terminal.process(chunk);
+                        let rendered = terminal.screen().contents();
+                        if rendered != screen {
+                            screen = rendered;
+                            frames.extend_from_slice(screen.as_bytes());
+                            frames.push(b'\n');
+                        }
                         ensure!(
-                            bytes.len() < 4 * 1024 * 1024,
+                            output_bytes < 4 * 1024 * 1024 && frames.len() < 4 * 1024 * 1024,
                             "Terminal fixture output exceeds limit"
                         );
                         if contains(chunk, b"\x1b[>q") {
@@ -356,7 +377,7 @@ impl Harness {
                     Err(e) => return Err(e.into()),
                 }
             }
-            if populated.is_none() && contains(&bytes, b"Morning Light") {
+            if populated.is_none() && screen.contains("Morning Light") {
                 populated = Some(start.elapsed());
                 next = Some(Instant::now() + Duration::from_millis(150));
                 if hangup {
@@ -368,19 +389,35 @@ impl Harness {
                 }
             }
             if next.is_some_and(|at| Instant::now() >= at) {
-                if let Some(key) = keys.get(index) {
-                    master.write_all(key)?;
-                    index += 1;
-                    next = Some(Instant::now() + Duration::from_millis(150));
-                } else if !quit {
-                    master.write_all(b"q")?;
-                    quit = true;
-                    next = None;
+                match steps.get(index) {
+                    Some(TuiStep::Key(key)) => {
+                        master.write_all(key)?;
+                        index += 1;
+                        next = Some(Instant::now() + Duration::from_millis(150));
+                    }
+                    Some(TuiStep::WaitFor(text)) => {
+                        if contains(screen.as_bytes(), text) {
+                            index += 1;
+                        }
+                    }
+                    None if !quit => {
+                        master.write_all(b"q")?;
+                        quit = true;
+                        next = None;
+                    }
+                    None => {}
                 }
             }
             if process.0.try_wait()?.is_some() {
                 break;
             }
+        }
+        if let Some(TuiStep::WaitFor(text)) = steps.get(index) {
+            anyhow::bail!(
+                "TUI did not display {}. Last screen:\n{}",
+                String::from_utf8_lossy(text),
+                screen
+            );
         }
         let end = Instant::now() + Duration::from_secs(2);
         let status = loop {
@@ -398,21 +435,21 @@ impl Harness {
                 status.success()
             },
             "TUI exited unsuccessfully: {}",
-            String::from_utf8_lossy(&bytes)
+            screen
         );
         ensure!(
             populated.is_some(),
             "TUI never produced its first populated frame"
         );
         ensure!(
-            !contains(&bytes, b"unsupported command"),
+            !contains(&frames, b"unsupported command"),
             "TUI used an unsupported command"
         );
         println!(
             "TUI first populated frame: {} ms",
             populated.unwrap().as_millis()
         );
-        Ok(bytes)
+        Ok(frames)
     }
 }
 impl Drop for Harness {

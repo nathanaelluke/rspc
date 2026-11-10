@@ -23,3 +23,4 @@ rspc = { path = "../.." }
 
 [dev-dependencies]
 libc = "0.2"
+vt100 = "0.16.2"

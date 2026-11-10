@@ -129,14 +129,23 @@ fn paged_artist_index_and_whole_artist_queue_actions() -> Result<()> {
 
 #[test]
 fn selection_info_on_every_library_page() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor};
+
     let h = Harness::demo()?;
-    for tab in [b"2", b"3", b"4", b"5", b"6"] {
-        let mut keys: Vec<&[u8]> = vec![tab];
+    let pages: &[(&[u8], &[u8])] = &[
+        (b"2", b"Liked Songs"),
+        (b"3", b"The Example Ensemble"),
+        (b"4", b"The Example Ensemble"),
+        (b"5", b"Example Sessions"),
+        (b"6", b"Demo Mix"),
+    ];
+    for &(tab, ready) in pages {
+        let mut steps = vec![Key(tab), WaitFor(ready)];
         if tab == b"2" {
-            keys.extend([b"/".as_slice(), b"Liked Songs", b"\r"]);
+            steps.extend([Key(b"/"), Key(b"Liked Songs"), Key(b"\r")]);
         }
-        keys.extend([b"oi".as_slice(), b"\x1b"]);
-        let output = h.tui(&keys, false)?;
+        steps.extend([Key(b"oi"), WaitFor(b"Selection info"), Key(b"\x1b")]);
+        let output = h.tui_steps(&steps, false)?;
         assert!(contains(&output, b"Selection info"));
         assert!(!contains(&output, b"timed out"));
     }
