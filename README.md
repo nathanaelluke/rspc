@@ -86,7 +86,7 @@ rspc doctor                   # inspect player state and errors
 rspc stop                     # stop the daemon and playback
 ```
 
-Local files and streams need MPD with partition support and a configured library.
+Local files and streams need MPD 0.24 or newer with a configured library.
 rspc uses a separate partition and leaves your default MPD queue alone. It reads
 MPD settings from `~/.config/rmpc/config.ron`, or the file passed with `--config`.
 `RSPC_MPD_ADDRESS`, `RSPC_MPD_PASSWORD` and `RSPC_MPD_OUTPUT` override them.

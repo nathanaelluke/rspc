@@ -14,7 +14,8 @@
       pkgs = packagesFor system;
       soloist = pkgs.callPackage ./packaging/nix/soloist.nix {};
       rspc = pkgs.callPackage ./packaging/nix/package.nix {inherit soloist;};
-    in {inherit rspc soloist; default = rspc;});
+      mpd = pkgs.mpd;
+    in {inherit rspc soloist mpd; default = rspc;});
     apps = forAllSystems (system: {
       default = {
         type = "app";

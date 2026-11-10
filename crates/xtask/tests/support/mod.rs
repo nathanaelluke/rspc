@@ -257,21 +257,22 @@ impl Harness {
     pub fn tui(&self, keys: &[&[u8]], hangup: bool) -> Result<Vec<u8>> {
         let mut master = -1;
         let mut slave = -1;
-        let size = libc::winsize {
+        let mut size = libc::winsize {
             ws_row: 35,
             ws_col: 120,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        // openpty returns two owned descriptors; neither pointer escapes the call.
+        // openpty returns two owned descriptors. No pointers escape the call.
+        // macOS requires writable settings and size pointers.
         ensure!(
             unsafe {
                 libc::openpty(
                     &mut master,
                     &mut slave,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
-                    &size,
+                    std::ptr::null_mut(),
+                    &raw mut size,
                 )
             } == 0,
             "Cannot open test terminal"
