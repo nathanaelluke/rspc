@@ -1,16 +1,16 @@
-# Rusty Spotify Player Client
+# rusty spotify player client
 
 I like rmpc's interface, but most of my music is on Spotify. rspc keeps that
 interface and adds Spotify alongside local files and streams, all in one queue.
 
 ![rspc showing the demo queue](assets/screenshot.png)
 
-## Install
+## install
 
 The package definitions are ready. AUR and Homebrew publication is pending.
 Once published, these installs also provide Spotify's Soloist player:
 
-| Package manager | Command |
+| package manager | command |
 | --- | --- |
 | AUR | `yay -S rspc-git` |
 | Homebrew | `brew install --cask nathanaelluke/tap/rspc` |
@@ -24,7 +24,7 @@ Soloist also needs a working audio service. On Linux, use PipeWire or PulseAudio
 To build from source, install current stable Rust, a C compiler, `pkg-config`
 and OpenSSL development headers. Native dependencies:
 
-| Platform | Packages |
+| platform | packages |
 | --- | --- |
 | Arch | `base-devel rust pkgconf openssl git` |
 | Debian / Ubuntu | `build-essential pkg-config libssl-dev git`, plus stable Rust |
@@ -52,7 +52,7 @@ on PATH. On NixOS, use the Nix package for its loader and audio libraries.
 Set `RSPC_SOLOIST_PATH` to use a different executable.
 rspc starts its own player, so do not enable a separate Soloist service for it.
 
-## Spotify setup
+## spotify setup
 
 You need Spotify Premium and your own
 [Soloist API key](https://developer.spotify.com/dashboard/soloist).
@@ -74,7 +74,7 @@ Soloist builds expire 90 days after their build date. Keep its package current:
 Nix users need an updated rspc flake input. Stop rspc before updating its player.
 The player is downloaded separately from Spotify, not bundled in rspc's releases.
 
-## Using rspc
+## using rspc
 
 ```sh
 rspc                          # open the interface
@@ -97,7 +97,7 @@ local files and followed users' playlists. Spotify and local tracks can share a
 queue, with a short gap when switching players. Spotify playlists cannot store
 local files. Local playlists appear under **Directories → Local Playlists**.
 
-## Configuration
+## configuration
 
 Configuration lives in `~/.config/rspc/config.ron`, with themes in `themes/`.
 Themes, layouts and keybindings use rmpc 0.11's RON configuration format. See
@@ -116,7 +116,7 @@ Catalog caches live in `~/.cache/rspc`. Queue state, pairing and logs live in
 Soloist key out of commits and bug reports. Logs can contain paths and library
 metadata. Inspect them before sharing and use `rspc --demo` for public screenshots.
 
-## Development
+## development
 
 `nix develop` provides the build dependencies and MPD for tests. Run `make check`
 for the Rust unit and integration tests, formatting, and Clippy. Tests use
