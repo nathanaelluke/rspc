@@ -1,4 +1,5 @@
 pub mod benchmark;
+pub mod licenses;
 pub mod pairing;
 pub mod privacy;
 pub mod release;

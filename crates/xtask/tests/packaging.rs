@@ -71,6 +71,14 @@ fn install_copies_both_binaries_and_preserves_config() -> Result<()> {
             .is_file()
     );
     assert!(!install.prefix().join("bin/soloist").exists());
+    assert_eq!(
+        fs::read(
+            install
+                .prefix()
+                .join("share/licenses/rspc/LICENSE-THIRD-PARTY")
+        )?,
+        fs::read(xtask::root().join(xtask::licenses::BUNDLE))?
+    );
     Ok(())
 }
 
@@ -121,6 +129,7 @@ fn checkout_private_files_are_not_packaged() -> Result<()> {
     fs::create_dir_all(checkout.join("scripts"))?;
     fs::create_dir_all(checkout.join("config/themes"))?;
     fs::create_dir_all(checkout.join("assets"))?;
+    fs::create_dir_all(checkout.join("packaging"))?;
     for name in [
         "README.md",
         "assets/screenshot.png",
@@ -128,6 +137,7 @@ fn checkout_private_files_are_not_packaged() -> Result<()> {
         "LICENSE-MIT",
         "LICENSE-BSD-3-Clause",
         "LICENSE-librespot",
+        "packaging/LICENSE-THIRD-PARTY",
         "scripts/install.sh",
         "config/config.ron",
         "config/themes/default.ron",
@@ -179,6 +189,7 @@ fn release_archive_contains_only_player_executables() -> Result<()> {
     assert!(listing.contains("/bin/rspc-ui\n"));
     assert!(!listing.lines().any(|line| line.ends_with("/soloist")));
     assert!(listing.contains("/share/doc/rspc/NOTICE"));
+    assert!(listing.contains("/share/licenses/rspc/LICENSE-THIRD-PARTY"));
     Ok(())
 }
 

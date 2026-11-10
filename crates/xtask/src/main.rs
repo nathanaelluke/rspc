@@ -13,6 +13,8 @@ struct Args {
 enum Action {
     /// Print the shared workspace version.
     Version,
+    /// Refresh the third-party license bundle using cargo-about.
+    Licenses,
     /// Check source, index and optionally history for private data.
     CheckRelease {
         #[arg(long)]
@@ -24,6 +26,11 @@ enum Action {
         target: String,
         #[arg(long, default_value = "target/release")]
         build_dir: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Package committed source and Cargo dependencies for offline rebuilding.
+    SourceArchive {
         #[arg(long)]
         output: PathBuf,
     },
@@ -69,7 +76,9 @@ async fn main() -> Result<()> {
     let root = xtask::root();
     match Args::parse().command {
         Action::Version => println!("{}", env!("CARGO_PKG_VERSION")),
+        Action::Licenses => xtask::licenses::generate(&root).await?,
         Action::CheckRelease { history } => {
+            xtask::licenses::check(&root)?;
             let findings = xtask::privacy::check(&root, history)?;
             for finding in &findings {
                 println!(
@@ -90,6 +99,7 @@ async fn main() -> Result<()> {
             build_dir,
             output,
         } => xtask::release::archive(&root, &target, &build_dir, &output)?,
+        Action::SourceArchive { output } => xtask::release::source_archive(&root, &output)?,
         Action::Recipes { artifacts, output } => {
             xtask::release::recipes(&root, &artifacts, &output)?
         }

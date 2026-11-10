@@ -1,0 +1,73 @@
+# The checked-in bundle covers all supported release targets, including build tools.
+accepted = [
+    "MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib",
+    "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "BSL-1.0",
+    "Apache-2.0 WITH LLVM-exception", "MPL-2.0", "OpenSSL",
+    "CDLA-Permissive-2.0",
+]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+ignore-dev-dependencies = true
+ignore-build-dependencies = false
+workarounds = ["ring", "chrono", "rustls", "rustix", "cocoa"]
+
+# This frontend dependency needs its corresponding source supplied with releases.
+[ansi_colours]
+accepted = ["LGPL-3.0-or-later"]
+
+[exr.clarify]
+license = "BSD-3-Clause"
+[[exr.clarify.files]]
+path = "LICENSE.md"
+checksum = "97e4d3aa7a9e8ac31979c16ca8bb2b628a9cb72c3362185ad2bf4ad77f43551f"
+
+[libm.clarify]
+license = "MIT"
+[[libm.clarify.files]]
+path = "LICENSE.txt"
+checksum = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7"
+
+[protobuf-parse.clarify]
+license = "MIT"
+[[protobuf-parse.clarify.files]]
+path = "LICENSE.txt"
+checksum = "ea240b0b1a772a073d2f8941f2145dd8f0b5b2d83c700107a84a1f7eb8ac7af1"
+
+[bon.clarify]
+license = "MIT"
+[[bon.clarify.git]]
+path = "LICENSE-MIT"
+checksum = "8f8dbb74f833dc8a2619fd1e86be60b06791c706e1be9e1b559ae715bbbc4551"
+
+[bon-macros.clarify]
+license = "MIT"
+[[bon-macros.clarify.git]]
+path = "LICENSE-MIT"
+checksum = "8f8dbb74f833dc8a2619fd1e86be60b06791c706e1be9e1b559ae715bbbc4551"
+
+[librespot-core.clarify]
+license = "MIT"
+[[librespot-core.clarify.git]]
+path = "LICENSE"
+checksum = "b6e979ad38c429c5811e9eb6930040a984619786f55ebc60660db05df5325ed6"
+
+[librespot-metadata.clarify]
+license = "MIT"
+[[librespot-metadata.clarify.git]]
+path = "LICENSE"
+checksum = "b6e979ad38c429c5811e9eb6930040a984619786f55ebc60660db05df5325ed6"
+
+[librespot-oauth.clarify]
+license = "MIT"
+[[librespot-oauth.clarify.git]]
+path = "LICENSE"
+checksum = "b6e979ad38c429c5811e9eb6930040a984619786f55ebc60660db05df5325ed6"
+
+[librespot-protocol.clarify]
+license = "MIT"
+[[librespot-protocol.clarify.git]]
+path = "LICENSE"
+checksum = "b6e979ad38c429c5811e9eb6930040a984619786f55ebc60660db05df5325ed6"

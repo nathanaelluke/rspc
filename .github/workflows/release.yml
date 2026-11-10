@@ -67,6 +67,15 @@ jobs:
           RELEASE_TARGET: ${{ matrix.target }}
         run: |
           target/debug/xtask archive --target "$RELEASE_TARGET" --output dist
+      - name: Verify packaged executables and licenses
+        run: |
+          version=$(target/debug/xtask version)
+          unpacked=$(mktemp -d)
+          tar -xzf dist/*.tar.gz -C "$unpacked"
+          package="$unpacked/rspc-$version"
+          "$package/bin/rspc" --version
+          "$package/bin/rspc-ui" version
+          test -s "$package/share/licenses/rspc/LICENSE-THIRD-PARTY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rspc-${{ matrix.target }}
@@ -98,11 +107,18 @@ jobs:
       - name: Check publication contents and prepare package recipes
         run: |
           target/debug/xtask check-release --history
-          version=$(target/debug/xtask version)
-          git archive --format=tar.gz --prefix="rspc-$version/" --output="dist/rspc-$version-source.tar.gz" HEAD
+          target/debug/xtask source-archive --output dist
           target/debug/xtask recipes --artifacts dist --output package-recipes
           tar -czf dist/package-recipes.tar.gz -C package-recipes .
           target/debug/xtask checksums --artifacts dist
+      - name: Verify offline source archive
+        run: |
+          version=$(target/debug/xtask version)
+          unpacked=$(mktemp -d)
+          tar -xzf "dist/rspc-$version-source.tar.gz" -C "$unpacked"
+          cd "$unpacked/rspc-$version"
+          CARGO_HOME=$(mktemp -d) cargo metadata --locked --offline --format-version 1 > "$RUNNER_TEMP/source-metadata.json"
+          test -s packaging/LICENSE-THIRD-PARTY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release

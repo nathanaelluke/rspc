@@ -24,6 +24,10 @@ for rspc_name in rspc rspc-ui; do
     exit 1
   }
 done
+[[ -s "$rspc_root/packaging/LICENSE-THIRD-PARTY" ]] || {
+  printf 'Missing third-party license bundle. Run cargo run -p xtask -- licenses.\n' >&2
+  exit 1
+}
 rspc_dest="${DESTDIR:-}$rspc_prefix"
 install -d "$rspc_dest/bin" "$rspc_dest/share/doc/rspc" \
   "$rspc_dest/share/licenses/rspc" "$rspc_dest/share/rspc"
@@ -44,6 +48,7 @@ install -m644 "$rspc_root/assets/screenshot.png" "$rspc_dest/share/doc/rspc/asse
 for rspc_license in LICENSE-MIT LICENSE-BSD-3-Clause LICENSE-librespot; do
   install -m644 "$rspc_root/$rspc_license" "$rspc_dest/share/licenses/rspc/$rspc_license"
 done
+install -m644 "$rspc_root/packaging/LICENSE-THIRD-PARTY" "$rspc_dest/share/licenses/rspc/LICENSE-THIRD-PARTY"
 install -d "$rspc_dest/share/rspc/config/themes"
 install -m644 "$rspc_root/config/config.ron" "$rspc_dest/share/rspc/config/config.ron"
 install -m644 "$rspc_root/config/themes/default.ron" "$rspc_dest/share/rspc/config/themes/default.ron"

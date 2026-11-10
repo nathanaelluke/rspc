@@ -27,6 +27,7 @@ pub fn digest(path: &Path) -> Result<String> {
 
 pub fn archive(root: &Path, target: &str, build: &Path, output: &Path) -> Result<()> {
     ensure!(TARGETS.contains(&target), "Unsupported release target");
+    crate::licenses::check(root)?;
     let stage = tempfile::tempdir()?;
     let prefix = format!("rspc-{VERSION}");
     crate::run(
@@ -43,6 +44,66 @@ pub fn archive(root: &Path, target: &str, build: &Path, output: &Path) -> Result
         Command::new("tar")
             .arg("-czf")
             .arg(output.join(format!("{prefix}-{target}.tar.gz")))
+            .arg("-C")
+            .arg(stage.path())
+            .arg(prefix),
+    )
+}
+
+pub fn source_archive(root: &Path, output: &Path) -> Result<()> {
+    crate::licenses::check(root)?;
+    ensure!(
+        crate::capture(
+            Command::new("git").current_dir(root).args([
+                "status",
+                "--porcelain",
+                "--untracked-files=normal"
+            ]),
+            1024 * 1024
+        )?
+        .is_empty(),
+        "Commit release sources before creating the source archive"
+    );
+    let stage = tempfile::tempdir()?;
+    let prefix = format!("rspc-{VERSION}");
+    let archive = stage.path().join("source.tar");
+    crate::run(
+        Command::new("git")
+            .current_dir(root)
+            .args([
+                "archive",
+                "--format=tar",
+                &format!("--prefix={prefix}/"),
+                "--output",
+            ])
+            .arg(&archive)
+            .arg("HEAD"),
+    )?;
+    crate::run(
+        Command::new("tar")
+            .arg("-xf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(stage.path()),
+    )?;
+    let source = stage.path().join(&prefix);
+    crate::run(Command::new("cargo").current_dir(&source).args([
+        "vendor",
+        "--locked",
+        "--versioned-dirs",
+        "vendor",
+    ]))?;
+    fs::create_dir_all(source.join(".cargo"))?;
+    fs::write(
+        source.join(".cargo/config.toml"),
+        "[build]\njobs = 1\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n[source.vendored-sources]\ndirectory = \"vendor\"\n",
+    )?;
+    crate::licenses::check(&source)?;
+    fs::create_dir_all(output)?;
+    crate::run(
+        Command::new("tar")
+            .arg("-czf")
+            .arg(output.join(format!("{prefix}-source.tar.gz")))
             .arg("-C")
             .arg(stage.path())
             .arg(prefix),

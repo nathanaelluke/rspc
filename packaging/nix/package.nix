@@ -10,6 +10,7 @@ rustPlatform.buildRustPackage {
       ../../config ../../assets ../../scripts/install.sh ../../README.md ../../NOTICE ../../LICENSE-MIT
       ../../LICENSE-BSD-3-Clause ../../LICENSE-librespot
       ../../packaging/aur ../../packaging/soloist-sources.json ../../packaging/rspc.service
+      ../../packaging/licenses.toml ../../packaging/LICENSE-GPL-3.0 ../../packaging/LICENSE-THIRD-PARTY
     ];
   };
   cargoLock.lockFile = ../../Cargo.lock;

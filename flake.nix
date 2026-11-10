@@ -24,7 +24,7 @@
     });
     devShells = forAllSystems (system: let pkgs = packagesFor system; in {
       default = pkgs.mkShell {
-        packages = with pkgs; [cargo rustc clippy rustfmt pkg-config mpd git];
+        packages = with pkgs; [cargo rustc clippy rustfmt pkg-config mpd git cargo-about];
         buildInputs = [pkgs.openssl];
         CARGO_BUILD_JOBS = "1";
       };

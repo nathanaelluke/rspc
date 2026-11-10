@@ -130,6 +130,11 @@ history for private files and credentials:
 cargo run --locked -p xtask -- check-release --history
 ```
 
+Packages include `packaging/LICENSE-THIRD-PARTY`. After changing dependencies,
+use `nix develop` and run `cargo run --locked -p xtask -- licenses` to refresh it.
+Release source archives include the Cargo dependencies for offline rebuilding
+and relinking.
+
 Spotify replaces its Soloist download archives in place. When they change,
 refresh Nix's pinned checksums with
 `cargo run --locked -p xtask -- update-soloist --write`.
