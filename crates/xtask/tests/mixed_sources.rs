@@ -321,7 +321,12 @@ fn audio_url_uses_mpd_in_the_same_queue() -> Result<()> {
     let server = thread::spawn(move || {
         while !done.load(Ordering::Relaxed) {
             if let Ok((mut stream, _)) = listener.accept() {
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .expect("set fixture socket read timeout");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .expect("set fixture socket write timeout");
                 if let Ok(clone) = stream.try_clone() {
                     let mut input = BufReader::new(clone);
                     let mut header = String::new();

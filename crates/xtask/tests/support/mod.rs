@@ -33,10 +33,19 @@ pub fn executable(name: &str) -> PathBuf {
 pub struct Process(pub Child);
 impl Drop for Process {
     fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
+        if !matches!(self.0.try_wait(), Ok(None)) {
+            return;
         }
-        let _ = self.0.wait();
+        let _ = self.0.kill();
+        // Cleanup must respect fixture timeouts, including after terminal hangups.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if !matches!(self.0.try_wait(), Ok(None)) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        eprintln!("Fixture process {} did not exit after SIGKILL", self.0.id());
     }
 }
 pub fn output(command: &mut Command, timeout: Duration) -> Result<Output> {
@@ -125,6 +134,7 @@ pub struct Harness {
 pub enum TuiStep<'a> {
     Key(&'a [u8]),
     WaitFor(&'a [u8]),
+    WaitUntilGone(&'a [u8]),
 }
 
 impl Harness {
@@ -400,6 +410,11 @@ impl Harness {
                             index += 1;
                         }
                     }
+                    Some(TuiStep::WaitUntilGone(text)) => {
+                        if !contains(screen.as_bytes(), text) {
+                            index += 1;
+                        }
+                    }
                     None if !quit => {
                         master.write_all(b"q")?;
                         quit = true;
@@ -412,12 +427,20 @@ impl Harness {
                 break;
             }
         }
-        if let Some(TuiStep::WaitFor(text)) = steps.get(index) {
-            anyhow::bail!(
+        // macOS can defer a hung-up child's exit until the PTY master closes.
+        drop(master);
+        match steps.get(index) {
+            Some(TuiStep::WaitFor(text)) => anyhow::bail!(
                 "TUI did not display {}. Last screen:\n{}",
                 String::from_utf8_lossy(text),
                 screen
-            );
+            ),
+            Some(TuiStep::WaitUntilGone(text)) => anyhow::bail!(
+                "TUI did not hide {}. Last screen:\n{}",
+                String::from_utf8_lossy(text),
+                screen
+            ),
+            _ => {}
         }
         let end = Instant::now() + Duration::from_secs(2);
         let status = loop {

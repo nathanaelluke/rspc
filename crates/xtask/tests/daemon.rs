@@ -33,11 +33,24 @@ fn launcher_starts_daemon_automatically() -> Result<()> {
 
 #[test]
 fn song_info_opens_full_catalog_without_changing_playback() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor, WaitUntilGone};
+
     let h = Harness::demo()?;
     h.cli(&["play", "0"])?;
     let id = h.status()?["songid"].clone();
-    let output = h.tui(
-        &[b"oI", b"jjjj", b"\r", b"/", b"Morning", b"\r", b"h"],
+    let output = h.tui_steps(
+        &[
+            Key(b"oI"),
+            WaitFor(b"spotify:track:demo1"),
+            Key(b"jjjj"),
+            Key(b"\r"),
+            WaitFor(b"Spotify catalog"),
+            Key(b"/"),
+            Key(b"Morning"),
+            Key(b"\r"),
+            Key(b"h"),
+            WaitUntilGone(b"Spotify catalog"),
+        ],
         false,
     )?;
     assert!(contains(&output, b"Spotify catalog"));
@@ -129,7 +142,7 @@ fn paged_artist_index_and_whole_artist_queue_actions() -> Result<()> {
 
 #[test]
 fn selection_info_on_every_library_page() -> Result<()> {
-    use support::TuiStep::{Key, WaitFor};
+    use support::TuiStep::{Key, WaitFor, WaitUntilGone};
 
     let h = Harness::demo()?;
     let pages: &[(&[u8], &[u8])] = &[
@@ -144,7 +157,12 @@ fn selection_info_on_every_library_page() -> Result<()> {
         if tab == b"2" {
             steps.extend([Key(b"/"), Key(b"Liked Songs"), Key(b"\r")]);
         }
-        steps.extend([Key(b"oi"), WaitFor(b"Selection info"), Key(b"\x1b")]);
+        steps.extend([
+            Key(b"oi"),
+            WaitFor(b"Selection info"),
+            Key(b"\x1b"),
+            WaitUntilGone(b"Selection info"),
+        ]);
         let output = h.tui_steps(&steps, false)?;
         assert!(contains(&output, b"Selection info"));
         assert!(!contains(&output, b"timed out"));
