@@ -279,6 +279,21 @@ impl Harness {
         );
         let mut master = unsafe { fs::File::from_raw_fd(master) };
         let slave = unsafe { fs::File::from_raw_fd(slave) };
+        for file in [&master, &slave] {
+            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("Cannot prevent test terminal descriptor inheritance");
+            }
+        }
+        // Keep terminal I/O nonblocking so hangups cannot bypass the deadline.
+        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
+                < 0
+        {
+            return Err(std::io::Error::last_os_error())
+                .context("Cannot make test terminal nonblocking");
+        }
         let mut command = self.command();
         command
             .stdin(Stdio::from(slave.try_clone()?))
@@ -297,6 +312,8 @@ impl Harness {
             });
         }
         let mut process = Process(command.spawn()?);
+        // Only the child should retain the slave terminal.
+        drop(command);
         let start = Instant::now();
         let deadline = start + Duration::from_secs(12);
         let mut bytes = Vec::new();
@@ -334,6 +351,7 @@ impl Harness {
                             master.write_all(b"\x1b[1;1R")?;
                         }
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
                     Err(e) => return Err(e.into()),
                 }

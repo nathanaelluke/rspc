@@ -87,7 +87,8 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           cargo build --release --locked -j2 -p rspc -p rspc-ui
-          cargo test --locked -j2 --workspace
+      - name: Test native build
+        run: cargo test --locked -j2 --workspace
 
   nix:
     runs-on: ubuntu-24.04
@@ -105,7 +106,7 @@ jobs:
         run: |
           nix build .#rspc --print-build-logs --max-jobs 1 --cores 1
           ./result/bin/rspc --version
-          ./result/bin/rspc-ui --version
+          ./result/bin/rspc-ui version
           player=$(nix build .#soloist --no-link --print-out-paths)
           "$player/bin/soloist" --version
       - name: Evaluate ARM and macOS packages
