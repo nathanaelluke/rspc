@@ -32,7 +32,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev mpd
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev mpd
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         run: |
@@ -40,7 +40,7 @@ jobs:
           echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
       - name: Set up Rust
         run: |
-          rustup update stable --profile minimal
+          rustup toolchain install stable --profile minimal
           rustup default stable
       - name: Check tag and build
         env:
@@ -83,8 +83,8 @@ jobs:
       - name: Prepare Rust release tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
-          rustup update stable --profile minimal
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+          rustup toolchain install stable --profile minimal
           rustup default stable
           cargo build --locked -j2 -p xtask
       - name: Check publication contents and prepare package recipes
