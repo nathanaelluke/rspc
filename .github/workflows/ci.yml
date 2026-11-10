@@ -103,7 +103,7 @@ jobs:
             cores = 1
       - name: Build and check installed executables
         run: |
-          nix build .#rspc --max-jobs 1 --cores 1
+          nix build .#rspc --print-build-logs --max-jobs 1 --cores 1
           ./result/bin/rspc --version
           ./result/bin/rspc-ui --version
           player=$(nix build .#soloist --no-link --print-out-paths)

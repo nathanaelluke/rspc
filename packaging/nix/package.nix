@@ -29,7 +29,7 @@ rustPlatform.buildRustPackage {
   '';
   installPhase = ''
     runHook preInstall
-    ./scripts/install.sh --prefix "$out" --build-dir "target/${stdenv.hostPlatform.rust.rustcTarget}/release"
+    bash ./scripts/install.sh --prefix "$out" --build-dir "target/${stdenv.hostPlatform.rust.rustcTarget}/release"
     runHook postInstall
   '';
   postFixup = ''
