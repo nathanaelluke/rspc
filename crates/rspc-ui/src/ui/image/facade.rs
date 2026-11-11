@@ -163,6 +163,10 @@ impl AlbumArtFacade {
         self.current_album_art.is_some()
     }
 
+    pub fn supports_overlay(&self) -> bool {
+        matches!(&self.image_backend, ImageBackend::Kitty(backend) if backend.uses_placeholders())
+    }
+
     pub fn show(&mut self, data: impl Into<Arc<Vec<u8>>>, ctx: &Ctx) -> Result<()> {
         let data = data.into();
         self.current_album_art = Some(Arc::clone(&data));
@@ -320,7 +324,20 @@ impl AlbumArtFacade {
         Ok(())
     }
 
-    pub fn preserve_image(&self, buffer: &mut ratatui::buffer::Buffer) {
+    pub fn render(&self, buffer: &mut ratatui::buffer::Buffer, ctx: &Ctx) {
+        if self.is_showing
+            && let ImageBackend::Kitty(backend) = &self.image_backend
+            && backend.uses_placeholders()
+        {
+            if let Some((_, EncodeData::Kitty(data))) = self
+                .prepared
+                .as_ref()
+                .filter(|(key, _)| self.desired.as_ref() == Some(key))
+            {
+                backend.render(buffer, data, ctx.config.theme.background_color);
+            }
+            return;
+        }
         if self.is_showing
             && let Some(area) = self.displayed_area
         {

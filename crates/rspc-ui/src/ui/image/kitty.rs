@@ -4,12 +4,11 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use crossterm::{
     cursor::{RestorePosition, SavePosition},
-    execute, queue,
-    style::{Colors, SetColors},
+    queue,
 };
 use flate2::Compression;
 use itertools::Itertools;
-use ratatui::prelude::{IntoCrossterm, Rect};
+use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use super::{Backend, csi_move};
 use crate::{
@@ -20,6 +19,7 @@ use crate::{
     ctx::Ctx,
     shared::{
         image::{create_aligned_area, get_gif_frames, resize_image},
+        terminal::{Emulator, TERMINAL},
         tmux::tmux_write,
     },
 };
@@ -34,14 +34,46 @@ impl Default for Kitty {
     fn default() -> Self {
         Self {
             uploaded: None,
-            unicode_placeholders: crate::shared::tmux::is_inside_tmux(),
+            unicode_placeholders: crate::shared::tmux::is_inside_tmux()
+                || TERMINAL.emulator() == Emulator::Kitty,
         }
     }
 }
 
 impl Kitty {
+    pub fn uses_placeholders(&self) -> bool {
+        self.unicode_placeholders
+    }
+
     pub fn invalidate(&mut self) {
         self.uploaded = None;
+    }
+
+    /// Put image cells in Ratatui's frame so popups can cover and restore them.
+    pub fn render(&self, buffer: &mut Buffer, data: &Data, background: Option<Color>) {
+        let area = match data {
+            Data::ImageData(image) => image.aligned_area,
+            Data::AnimationData(animation) => animation.aligned_area,
+        };
+        let mut symbol = String::with_capacity(16);
+        for position in area.intersection(*buffer.area()).positions() {
+            let Some(row) = GRID.get(usize::from(position.y - area.y)) else {
+                continue;
+            };
+            let Some(col) = GRID.get(usize::from(position.x - area.x)) else {
+                continue;
+            };
+            symbol.clear();
+            symbol.push(PLACEHOLDER);
+            symbol.push_str(row);
+            symbol.push_str(col);
+            let cell = &mut buffer[position];
+            cell.reset();
+            cell.set_symbol(&symbol).set_fg(Color::Indexed(1));
+            if let Some(background) = background {
+                cell.set_bg(background);
+            }
+        }
     }
 }
 
@@ -63,7 +95,7 @@ impl Backend for Kitty {
         Ok(())
     }
 
-    fn display(&mut self, w: &mut impl Write, data: &Self::EncodedData, ctx: &Ctx) -> Result<()> {
+    fn display(&mut self, w: &mut impl Write, data: &Self::EncodedData, _ctx: &Ctx) -> Result<()> {
         let cached = self
             .uploaded
             .as_ref()
@@ -76,6 +108,7 @@ impl Backend for Kitty {
                         &image.content,
                         image.img_width,
                         image.img_height,
+                        image.aligned_area,
                         self.unicode_placeholders,
                     )?;
                 }
@@ -88,16 +121,7 @@ impl Backend for Kitty {
                 animation.aligned_area
             }
         };
-        if self.unicode_placeholders {
-            create_unicode_placeholder_grid(
-                w,
-                ctx.config
-                    .theme
-                    .background_color
-                    .map(|color| color.into_crossterm()),
-                area,
-            )?;
-        } else {
+        if !self.unicode_placeholders {
             queue!(w, SavePosition)?;
             csi_move!(w, area.x, area.y)?;
             tmux_write!(
@@ -180,38 +204,6 @@ impl Backend for Kitty {
     }
 }
 
-fn create_unicode_placeholder_grid(
-    w: &mut impl Write,
-    bg_color: Option<crossterm::style::Color>,
-    area: Rect,
-) -> Result<()> {
-    let colors = Colors {
-        background: bg_color,
-        foreground: None,
-    };
-    let mut buf = Vec::with_capacity(area.width as usize * area.height as usize * 2);
-    execute!(buf, SetColors(colors))?;
-    for y in 0..area.height {
-        csi_move!(buf, area.left(), area.top() + y)?;
-        write!(buf, "\x1b[38;5;1m")?;
-
-        for x in 0..area.width {
-            write!(
-                buf,
-                "{DELIM}{row}{col}",
-                row = GRID[y as usize],
-                col = GRID[x as usize]
-            )?;
-        }
-
-        write!(buf, "\x1b[39m")?;
-    }
-    w.write_all(&buf)?;
-    w.flush()?;
-
-    Ok(())
-}
-
 fn transfer_animation_data(
     w: &mut impl Write,
     data: &AnimationData,
@@ -288,6 +280,7 @@ fn transfer_image_data(
     content: &str,
     img_width: u32,
     img_height: u32,
+    area: Rect,
     unicode_placeholders: bool,
 ) -> Result<()> {
     let start_time = Instant::now();
@@ -300,7 +293,9 @@ fn transfer_image_data(
     let placeholder = u8::from(unicode_placeholders);
     tmux_write!(
         w,
-        "\x1b_Gi=1,f=32,U={placeholder},t=d,a={action},m={more},q=2,o=z,s={img_width},v={img_height};{first}\x1b\\"
+        "\x1b_Gi=1,f=32,U={placeholder},t=d,a={action},m={more},q=2,o=z,s={img_width},v={img_height},c={cols},r={rows};{first}\x1b\\",
+        cols = area.width,
+        rows = area.height
     )?;
 
     while iter.peek().is_some() {
@@ -345,7 +340,7 @@ pub struct AnimationData {
     aligned_area: Rect,
 }
 
-const DELIM: &str = "\u{10EEEE}";
+pub const PLACEHOLDER: char = '\u{10EEEE}';
 
 const GRID: &[&str] = &[
     "\u{0305}",
@@ -693,7 +688,7 @@ mod tests {
             "hiding must retain the image data"
         );
         if unicode_placeholders {
-            assert!(restored.contains(DELIM));
+            assert!(!restored.contains("a=p"));
         } else {
             assert!(restored.contains("a=p"));
             assert!(restored.contains("d=i"));
@@ -710,8 +705,55 @@ mod tests {
     #[test]
     fn a_small_image_finishes_in_its_first_transfer_chunk() {
         let mut output = Vec::new();
-        transfer_image_data(&mut output, "small", 2, 2, false).expect("small transfer");
+        transfer_image_data(&mut output, "small", 2, 2, Rect::new(0, 0, 2, 2), false)
+            .expect("small transfer");
         assert!(String::from_utf8_lossy(&output).contains("m=0"));
         assert!(!String::from_utf8_lossy(&output).contains("m=1"));
+    }
+
+    #[test]
+    fn popups_cover_only_the_image_cells_they_overlap() {
+        use ratatui::{Terminal, backend::TestBackend, widgets::Clear};
+
+        let backend = Kitty {
+            uploaded: None,
+            unicode_placeholders: true,
+        };
+        let image = image();
+        let mut terminal = Terminal::new(TestBackend::new(5, 4)).expect("terminal");
+        let popup = Rect::new(2, 1, 2, 2);
+        let render = |frame: &mut ratatui::Frame, modal| {
+            backend.render(frame.buffer_mut(), &image, Some(Color::Black));
+            if modal {
+                frame.render_widget(Clear, popup);
+            }
+        };
+        terminal.draw(|frame| render(frame, false)).expect("cover");
+        let original = terminal.backend().buffer().clone();
+        terminal.draw(|frame| render(frame, true)).expect("popup");
+        let overlaid = terminal.backend().buffer();
+        assert_eq!(overlaid[(1, 1)], original[(1, 1)]);
+        assert!(overlaid[(1, 1)].symbol().starts_with(PLACEHOLDER));
+        assert_eq!(overlaid[(2, 1)].symbol(), " ");
+        terminal
+            .draw(|frame| render(frame, false))
+            .expect("close popup");
+        assert_eq!(terminal.backend().buffer(), &original);
+    }
+
+    #[test]
+    fn image_cells_are_clipped_without_changing_their_source_coordinates() {
+        let backend = Kitty {
+            uploaded: None,
+            unicode_placeholders: true,
+        };
+        let mut buffer = Buffer::empty(Rect::new(2, 2, 2, 2));
+        backend.render(&mut buffer, &image(), None);
+        assert_eq!(
+            buffer[(2, 2)].symbol(),
+            format!("{PLACEHOLDER}{}{}", GRID[1], GRID[1])
+        );
+        assert_eq!(buffer[(2, 2)].fg, Color::Indexed(1));
+        assert_eq!(buffer[(3, 3)].symbol(), " ");
     }
 }

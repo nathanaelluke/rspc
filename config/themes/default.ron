@@ -1,3 +1,4 @@
+
 // rspc default theme. Derived from the rmpc 0.11 theme layout.
 #![enable(implicit_some)]
 #![enable(unwrap_newtypes)]
@@ -43,12 +44,12 @@
     ),
     scrollbar: None,
     tab_bar: (
-        fill: true,
-        padding: 2,
+        fill: false,
+        padding: 3,
         min_width: 0,
         alignment: Center,
         active_style: (fg: "#ffffff", bg: "#505050", modifiers: "Bold"),
-        inactive_style: (fg: "#a0a0a0", bg: "#191919"),
+        inactive_style: (fg: "#a0a0a0", bg: "#101010"),
     ),
     lyrics: (
         timestamp: false
@@ -108,16 +109,25 @@
                 size: "1",
                 background_color: "#191919",
                 pane: Split(direction: Horizontal, panes: [
-                    (size: "auto", pane: Component("state")),
-                    (size: "1", pane: Component("separator")),
-                    (size: "100%", pane: Pane(Tabs)),
-                    (size: "1", pane: Component("separator")),
-                    (size: "10", pane: Component("volume")),
+                    (size: "12", pane: Component("state")),
+                    (size: "100%", pane: Component("song_info")),
+                    (size: "12", pane: Component("volume")),
                 ]),
             ),
             (
-                pane: Pane(TabContent),
+                size: "2",
+                borders: "BOTTOM",
+                border_symbols: Plain,
+                border_style: (fg: "#303030"),
+                pane: Pane(Tabs),
+            ),
+            (
                 size: "100%",
+                pane: Split(direction: Horizontal, panes: [
+                    (size: "1", pane: Pane(Empty())),
+                    (size: "100%", pane: Pane(TabContent)),
+                    (size: "1", pane: Pane(Empty())),
+                ]),
             ),
             (
                 size: "1",
@@ -146,26 +156,39 @@
                 (kind: Text("] "), style: (fg: "#eeeeee", modifiers: "Bold")),
             ], align: Left,
         )),
-        "song_details": Pane(Property(
+        "song_info": Pane(Property(
             content: [
-                (kind: Property(Song(Title)), style: (fg: "#eeeeee", modifiers: "Bold"),
-                    default: (kind: Text("No Song"))),
-                (kind: Text("\n\n")),
-                (kind: Property(Song(Artist)), style: (fg: "#b0b0b0"),
-                    default: (kind: Text("Unknown Artist"))),
-                (kind: Text("\n\n")),
-                (kind: Property(Song(Album)), style: (fg: "#a0a0a0"),
-                    default: (kind: Text("Unknown Album"))),
-            ], align: Center, wrap: true, vertical_align: Center,
+                (
+                    kind: Property(Song(Title)),
+                    style: (fg: "#eeeeee", modifiers: "Bold"),
+                    default: (kind: Text("No Song")),
+                ),
+                (
+                    kind: Text(" · "),
+                    style: (fg: "#606060"),
+                ),
+                (
+                    kind: Property(Song(Artist)),
+                    style: (fg: "#b0b0b0"),
+                ),
+                (
+                    kind: Text(" · "),
+                    style: (fg: "#606060"),
+                ),
+                (
+                    kind: Property(Song(Album)),
+                    style: (fg: "#a0a0a0"),
+                ),
+            ],
+            align: Center,
         )),
-        "now_playing": Split(direction: Horizontal, panes: [
-            (size: "3", pane: Pane(Empty())),
-            (size: "100%", pane: Split(direction: Vertical, panes: [
-                (size: "1", pane: Pane(Empty())),
-                (size: "0.45r", pane: Pane(AlbumArt)),
-                (size: "100%", pane: Component("song_details")),
-            ])),
-            (size: "3", pane: Pane(Empty())),
+        "now_playing": Pane(AlbumArt),
+        "content_divider": Split(direction: Horizontal, panes: [
+            (size: "1", pane: Pane(Empty())),
+            (size: "1", borders: "LEFT", border_symbols: Plain,
+                border_style: (fg: "#404040"), border_active_style: (fg: "#404040"),
+                pane: Pane(Empty())),
+            (size: "1", pane: Pane(Empty())),
         ]),
         "volume": Pane(Property(
             content: [

@@ -73,9 +73,9 @@ impl AlbumArtPane {
 }
 
 impl Pane for AlbumArtPane {
-    fn render(&mut self, frame: &mut Frame, area: Rect, _ctx: &Ctx) -> Result<()> {
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
         self.album_art.set_size(area);
-        self.album_art.preserve_image(frame.buffer_mut());
+        self.album_art.render(frame.buffer_mut(), ctx);
         Ok(())
     }
 
@@ -93,7 +93,7 @@ impl Pane for AlbumArtPane {
     }
 
     fn resize(&mut self, area: Rect, ctx: &Ctx) -> Result<()> {
-        if self.is_modal_open {
+        if self.is_modal_open && !self.album_art.supports_overlay() {
             return Ok(());
         }
         self.album_art.resize(area, ctx)
@@ -121,7 +121,7 @@ impl Pane for AlbumArtPane {
         is_visible: bool,
         ctx: &Ctx,
     ) -> Result<()> {
-        if !is_visible || self.is_modal_open {
+        if !is_visible || (self.is_modal_open && !self.album_art.supports_overlay()) {
             return Ok(());
         }
         match (id, data) {
@@ -142,18 +142,18 @@ impl Pane for AlbumArtPane {
         match event {
             UiEvent::SongChanged | UiEvent::Reconnected if is_visible => {
                 self.fetch_needed = true;
-                if self.is_modal_open {
+                if self.is_modal_open && !self.album_art.supports_overlay() {
                     return Ok(());
                 }
                 self.before_show(ctx)?;
             }
             UiEvent::Displayed if is_visible => {
-                if is_visible && !self.is_modal_open {
+                if !self.is_modal_open || self.album_art.supports_overlay() {
                     self.album_art.redraw_current(ctx)?;
                 }
             }
             UiEvent::ModalOpened if is_visible => {
-                if !self.is_modal_open {
+                if !self.is_modal_open && !self.album_art.supports_overlay() {
                     self.album_art.hide(ctx)?;
                 }
                 self.is_modal_open = true;
@@ -165,11 +165,13 @@ impl Pane for AlbumArtPane {
                     self.before_show(ctx)?;
                     return Ok(());
                 }
-                self.album_art.show_current(ctx)?;
+                if !self.album_art.supports_overlay() {
+                    self.album_art.show_current(ctx)?;
+                }
             }
             UiEvent::ConfigChanged => {
                 self.fetch_needed = true;
-                if is_visible && !self.is_modal_open {
+                if is_visible && (!self.is_modal_open || self.album_art.supports_overlay()) {
                     self.album_art.show_current(ctx)?;
                 }
             }

@@ -215,7 +215,12 @@ impl<'ui> Ui<'ui> {
 
         if ctx.config.theme.modal_backdrop && !self.modals.is_empty() {
             let buffer = frame.buffer_mut();
-            buffer.set_style(*buffer.area(), Style::default().fg(Color::DarkGray));
+            for cell in &mut buffer.content {
+                // A Kitty image's foreground identifies its pixels, not a text color.
+                if !cell.symbol().starts_with(image::kitty::PLACEHOLDER) {
+                    cell.set_fg(Color::DarkGray);
+                }
+            }
         }
 
         for modal in &mut self.modals {
