@@ -33,6 +33,13 @@ pub struct AlbumArtFacade {
     hide_pending: bool,
     display_pending: bool,
     revision: u64,
+    presentation: Presentation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Presentation {
+    Normal,
+    Modal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,19 +50,21 @@ struct ImageRequest {
     horizontal_align: crate::config::album_art::HorizontalAlign,
     vertical_align: crate::config::album_art::VerticalAlign,
     revision: u64,
+    method: ImageMethod,
 }
 
 impl ImageRequest {
-    fn encode(&self, method: ImageMethod) -> Result<EncodeData> {
+    fn encode(&self) -> Result<EncodeData> {
         let Self {
             data,
             area,
             max_size,
             horizontal_align,
             vertical_align,
+            method,
             ..
         } = self;
-        Ok(match method {
+        Ok(match *method {
             ImageMethod::Kitty => EncodeData::Kitty(Kitty::create_data(
                 data,
                 *area,
@@ -141,6 +150,7 @@ impl AlbumArtFacade {
             hide_pending: false,
             display_pending: false,
             revision: 0,
+            presentation: Presentation::Normal,
         }
     }
 
@@ -164,7 +174,25 @@ impl AlbumArtFacade {
     }
 
     pub fn supports_overlay(&self) -> bool {
-        matches!(&self.image_backend, ImageBackend::Kitty(backend) if backend.uses_placeholders())
+        matches!(&self.image_backend, ImageBackend::Block(_))
+            || matches!(&self.image_backend, ImageBackend::Kitty(backend) if backend.uses_placeholders())
+    }
+
+    pub fn set_modal_open(&mut self, open: bool, ctx: &Ctx) -> Result<()> {
+        let presentation = if open {
+            Presentation::Modal
+        } else {
+            Presentation::Normal
+        };
+        if self.presentation == presentation {
+            return Ok(());
+        }
+        self.presentation = presentation;
+        if !self.supports_overlay() && self.is_showing {
+            self.hide_pending = self.displayed_area.is_some();
+            self.show_current(ctx)?;
+        }
+        Ok(())
     }
 
     pub fn show(&mut self, data: impl Into<Arc<Vec<u8>>>, ctx: &Ctx) -> Result<()> {
@@ -181,6 +209,7 @@ impl AlbumArtFacade {
             horizontal_align: ctx.config.album_art.horizontal_align,
             vertical_align: ctx.config.album_art.vertical_align,
             revision: self.revision,
+            method: self.render_method(),
         };
         self.desired = Some(request.clone());
         self.display_pending = self
@@ -195,20 +224,24 @@ impl AlbumArtFacade {
         Ok(())
     }
 
-    fn encode(&mut self, request: ImageRequest) -> Result<()> {
-        let method = match self.image_backend {
+    fn render_method(&self) -> ImageMethod {
+        if self.presentation == Presentation::Modal && !self.supports_overlay() {
+            return ImageMethod::Block;
+        }
+        match self.image_backend {
             ImageBackend::Kitty(_) => ImageMethod::Kitty,
             ImageBackend::Iterm2(_) => ImageMethod::Iterm2,
             ImageBackend::Sixel(_) => ImageMethod::Sixel,
             ImageBackend::Block(_) => ImageMethod::Block,
             ImageBackend::Ueberzug(_) => ImageMethod::UeberzugWayland,
-            ImageBackend::None => return Ok(()),
-        };
+            ImageBackend::None => ImageMethod::None,
+        }
+    }
+
+    fn encode(&mut self, request: ImageRequest) -> Result<()> {
         let work = request.clone();
         self.work_tx
-            .send(WorkRequest::ResizeImage(Box::new(move || {
-                work.encode(method)
-            })))?;
+            .send(WorkRequest::ResizeImage(Box::new(move || work.encode())))?;
         self.in_flight = Some(request);
         Ok(())
     }
@@ -300,6 +333,9 @@ impl AlbumArtFacade {
         else {
             return Ok(());
         };
+        if matches!(data, EncodeData::Block(_)) {
+            return Ok(());
+        }
         let writer = TERMINAL.writer();
         let mut writer = writer.lock();
         match (&mut self.image_backend, data) {
@@ -325,6 +361,15 @@ impl AlbumArtFacade {
     }
 
     pub fn render(&self, buffer: &mut ratatui::buffer::Buffer, ctx: &Ctx) {
+        if self.is_showing
+            && let Some((_, EncodeData::Block(data))) = self
+                .prepared
+                .as_ref()
+                .filter(|(key, _)| self.desired.as_ref() == Some(key))
+        {
+            Block::render(buffer, data);
+            return;
+        }
         if self.is_showing
             && let ImageBackend::Kitty(backend) = &self.image_backend
             && backend.uses_placeholders()
@@ -489,5 +534,55 @@ mod tests {
         facade.resize(facade.last_size, &ctx).expect("font resize");
         assert!(!facade.display_pending);
         assert_eq!(work_request_channel.1.len(), 1);
+    }
+
+    #[rstest]
+    fn popup_uses_cell_art_and_restores_the_original_protocol(
+        mut ctx: Ctx,
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+    ) {
+        ctx.work_sender = work_request_channel.0.clone();
+        Arc::make_mut(&mut ctx.config).album_art.method = ImageMethod::Iterm2;
+        Arc::make_mut(&mut ctx.config).album_art.max_size_px = Size {
+            width: 32,
+            height: 32,
+        };
+        let mut facade = AlbumArtFacade::new(&ctx);
+        facade.set_size(Rect::new(1, 1, 8, 4));
+        facade.show_default(&ctx).expect("show cover");
+        complete(&work_request_channel.1, &mut facade, &ctx);
+
+        facade.set_modal_open(true, &ctx).expect("open popup");
+        complete(&work_request_channel.1, &mut facade, &ctx);
+        assert!(matches!(facade.prepared, Some((_, EncodeData::Block(_)))));
+        assert!(facade.is_showing);
+
+        facade.set_modal_open(false, &ctx).expect("close popup");
+        complete(&work_request_channel.1, &mut facade, &ctx);
+        assert!(matches!(facade.prepared, Some((_, EncodeData::Iterm2(_)))));
+        assert!(facade.is_showing);
+    }
+
+    #[rstest]
+    fn closing_a_popup_before_cell_art_is_ready_does_not_show_stale_art(
+        mut ctx: Ctx,
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+    ) {
+        ctx.work_sender = work_request_channel.0.clone();
+        Arc::make_mut(&mut ctx.config).album_art.method = ImageMethod::Iterm2;
+        Arc::make_mut(&mut ctx.config).album_art.max_size_px = Size {
+            width: 32,
+            height: 32,
+        };
+        let mut facade = AlbumArtFacade::new(&ctx);
+        facade.set_size(Rect::new(1, 1, 8, 4));
+        facade.show_default(&ctx).expect("show cover");
+        complete(&work_request_channel.1, &mut facade, &ctx);
+        facade.set_modal_open(true, &ctx).expect("open popup");
+        facade.set_modal_open(false, &ctx).expect("close popup");
+        complete(&work_request_channel.1, &mut facade, &ctx);
+        assert!(matches!(facade.prepared, Some((_, EncodeData::Iterm2(_)))));
+        assert!(facade.display_pending);
+        assert!(work_request_channel.1.is_empty());
     }
 }

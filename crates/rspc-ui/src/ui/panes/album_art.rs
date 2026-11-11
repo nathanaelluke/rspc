@@ -14,7 +14,6 @@ use crate::{
 #[derive(Debug)]
 pub struct AlbumArtPane {
     album_art: AlbumArtFacade,
-    is_modal_open: bool,
     fetch_needed: bool,
     song_file: Option<String>,
 }
@@ -25,7 +24,6 @@ impl AlbumArtPane {
     pub fn new(ctx: &Ctx) -> Self {
         Self {
             album_art: AlbumArtFacade::new(ctx),
-            is_modal_open: false,
             fetch_needed: true,
             song_file: None,
         }
@@ -93,9 +91,6 @@ impl Pane for AlbumArtPane {
     }
 
     fn resize(&mut self, area: Rect, ctx: &Ctx) -> Result<()> {
-        if self.is_modal_open && !self.album_art.supports_overlay() {
-            return Ok(());
-        }
         self.album_art.resize(area, ctx)
     }
 
@@ -121,7 +116,7 @@ impl Pane for AlbumArtPane {
         is_visible: bool,
         ctx: &Ctx,
     ) -> Result<()> {
-        if !is_visible || (self.is_modal_open && !self.album_art.supports_overlay()) {
+        if !is_visible {
             return Ok(());
         }
         match (id, data) {
@@ -142,36 +137,25 @@ impl Pane for AlbumArtPane {
         match event {
             UiEvent::SongChanged | UiEvent::Reconnected if is_visible => {
                 self.fetch_needed = true;
-                if self.is_modal_open && !self.album_art.supports_overlay() {
-                    return Ok(());
-                }
                 self.before_show(ctx)?;
             }
             UiEvent::Displayed if is_visible => {
-                if !self.is_modal_open || self.album_art.supports_overlay() {
-                    self.album_art.redraw_current(ctx)?;
-                }
+                self.album_art.redraw_current(ctx)?;
             }
             UiEvent::ModalOpened if is_visible => {
-                if !self.is_modal_open && !self.album_art.supports_overlay() {
-                    self.album_art.hide(ctx)?;
-                }
-                self.is_modal_open = true;
+                self.album_art.set_modal_open(true, ctx)?;
             }
             UiEvent::ModalClosed if is_visible => {
-                self.is_modal_open = false;
+                self.album_art.set_modal_open(false, ctx)?;
 
                 if self.fetch_needed {
                     self.before_show(ctx)?;
                     return Ok(());
                 }
-                if !self.album_art.supports_overlay() {
-                    self.album_art.show_current(ctx)?;
-                }
             }
             UiEvent::ConfigChanged => {
                 self.fetch_needed = true;
-                if is_visible && (!self.is_modal_open || self.album_art.supports_overlay()) {
+                if is_visible {
                     self.album_art.show_current(ctx)?;
                 }
             }

@@ -124,8 +124,7 @@ impl InfoListModal {
                     url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
                 format!("rspc://catalog/artist/{id}/{encoded}")
             };
-            // Keep a modal open throughout the transition so album art stays
-            // hidden while the catalog replaces song information.
+            // Keep a modal open throughout the transition to the catalog.
             ctx.app_event_sender
                 .send(crate::AppEvent::UiEvent(crate::ui::UiAppEvent::Modal(
                     Box::new(super::catalog::CatalogModal::new(path, value)),

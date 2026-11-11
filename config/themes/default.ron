@@ -8,6 +8,7 @@
     format_tag_separator: " | ",
     browser_column_widths: [20, 38, 42],
     background_color: Some("#101010"),
+    join_borders: true,
     text_color: Some("#d4d4d4"),
     header_background_color: Some("#252525"),
     modal_background_color: Some("#1e1e1e"),
@@ -45,11 +46,11 @@
     scrollbar: None,
     tab_bar: (
         fill: false,
-        padding: 3,
+        padding: 1,
         min_width: 0,
         alignment: Center,
-        active_style: (fg: "#ffffff", bg: "#505050", modifiers: "Bold"),
-        inactive_style: (fg: "#a0a0a0", bg: "#101010"),
+        active_style: (fg: "#f0f0f0", bg: "#292929", modifiers: "Bold"),
+        inactive_style: (fg: "#858585", bg: "#101010"),
     ),
     lyrics: (
         timestamp: false
@@ -109,9 +110,12 @@
                 size: "1",
                 background_color: "#191919",
                 pane: Split(direction: Horizontal, panes: [
-                    (size: "12", pane: Component("state")),
+                    (size: "1", pane: Pane(Empty())),
+                    (size: "9", pane: Component("state")),
                     (size: "100%", pane: Component("song_info")),
-                    (size: "12", pane: Component("volume")),
+                    (size: "1", pane: Pane(Empty())),
+                    (size: "9", pane: Component("volume")),
+                    (size: "1", pane: Pane(Empty())),
                 ]),
             ),
             (
@@ -130,8 +134,11 @@
                 ]),
             ),
             (
-                size: "1",
+                size: "2",
                 background_color: "#191919",
+                borders: "TOP",
+                border_symbols: Plain,
+                border_style: (fg: "#303030"),
                 pane: Split(
                     direction: Horizontal,
                     panes: [
@@ -151,36 +158,35 @@
     components: {
         "state": Pane(Property(
             content: [
-                (kind: Text(" ["), style: (fg: "#eeeeee", modifiers: "Bold")),
-                (kind: Property(Status(StateV2( ))), style: (fg: "#eeeeee", modifiers: "Bold")),
-                (kind: Text("] "), style: (fg: "#eeeeee", modifiers: "Bold")),
+                (kind: Property(Status(StateV2(
+                    playing_label: "PLAYING",
+                    paused_label: "PAUSED",
+                    stopped_label: "STOPPED",
+                ))), style: (fg: "#a0a0a0")),
             ], align: Left,
         )),
         "song_info": Pane(Property(
             content: [
                 (
                     kind: Property(Song(Title)),
-                    style: (fg: "#eeeeee", modifiers: "Bold"),
-                    default: (kind: Text("No Song")),
+                    style: (fg: "#f2f2f2", modifiers: "Bold"),
+                    default: (kind: Text("Nothing playing"), style: (fg: "#b0b0b0")),
                 ),
                 (
-                    kind: Text(" · "),
-                    style: (fg: "#606060"),
+                    kind: Group([
+                        (kind: Text("  ·  "), style: (fg: "#606060")),
+                        (kind: Property(Song(Artist)), style: (fg: "#b0b0b0")),
+                    ]),
                 ),
                 (
-                    kind: Property(Song(Artist)),
-                    style: (fg: "#b0b0b0"),
-                ),
-                (
-                    kind: Text(" · "),
-                    style: (fg: "#606060"),
-                ),
-                (
-                    kind: Property(Song(Album)),
-                    style: (fg: "#a0a0a0"),
+                    kind: Group([
+                        (kind: Text("  ·  "), style: (fg: "#606060")),
+                        (kind: Property(Song(Album)), style: (fg: "#858585")),
+                    ]),
                 ),
             ],
             align: Center,
+            scroll_speed: 1,
         )),
         "now_playing": Pane(AlbumArt),
         "content_divider": Split(direction: Horizontal, panes: [
@@ -192,9 +198,9 @@
         ]),
         "volume": Pane(Property(
             content: [
-                (kind: Text(" VOL "), style: (fg: "#808080")),
+                (kind: Text("VOL "), style: (fg: "#808080")),
                 (kind: Property(Status(Volume)), style: (fg: "#b0b0b0")),
-                (kind: Text("% "), style: (fg: "#b0b0b0")),
+                (kind: Text("%"), style: (fg: "#b0b0b0")),
             ], align: Right,
         )),
         "states": Pane(Property(

@@ -50,6 +50,7 @@ const DEFAULT_ART: &[u8; 58599] = include_bytes!("../../../assets/default.jpg");
 #[derive(derive_more::Debug, Clone)]
 pub struct UiConfig {
     pub draw_borders: bool,
+    pub join_borders: bool,
     pub background_color: Option<Color>,
     pub header_background_color: Option<Color>,
     pub modal_background_color: Option<Color>,
@@ -94,8 +95,10 @@ impl Default for UiConfig {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools, reason = "independent theme settings")]
 pub struct UiConfigFile {
     pub(super) draw_borders: bool,
+    pub(super) join_borders: bool,
     pub(super) symbols: SymbolsFile,
     pub(super) tab_bar: TabBarFile,
     pub(super) progress_bar: ProgressBarConfigFile,
@@ -138,6 +141,7 @@ impl Default for UiConfigFile {
             layout: PaneOrSplitFile::default(),
             default_album_art_path: None,
             draw_borders: true,
+            join_borders: false,
             background_color: None,
             text_color: None,
             header_background_color: None,
@@ -411,6 +415,7 @@ impl TryFrom<UiConfigFile> for UiConfig {
             cava: value.cava.into_config(bg_color)?,
             background_color: bg_color,
             draw_borders: value.draw_borders,
+            join_borders: value.join_borders,
             format_tag_separator: value.format_tag_separator,
             multiple_tag_resolution_strategy: value.multiple_tag_resolution_strategy,
             modal_background_color: StringColor(value.modal_background_color)

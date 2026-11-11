@@ -213,11 +213,17 @@ impl<'ui> Ui<'ui> {
             ctx,
         )?;
 
+        if ctx.config.theme.join_borders {
+            border_junctions::join(frame.buffer_mut());
+        }
+
         if ctx.config.theme.modal_backdrop && !self.modals.is_empty() {
             let buffer = frame.buffer_mut();
             for cell in &mut buffer.content {
-                // A Kitty image's foreground identifies its pixels, not a text color.
-                if !cell.symbol().starts_with(image::kitty::PLACEHOLDER) {
+                // Image cell foregrounds identify pixels, not text colors.
+                if !cell.symbol().starts_with(image::kitty::PLACEHOLDER)
+                    && cell.symbol() != image::block::LOWER_HALF_BLOCK
+                {
                     cell.set_fg(Color::DarkGray);
                 }
             }
@@ -1231,5 +1237,54 @@ impl Config {
                 .end_style(scrollbar.ends_style)
                 .thumb_style(scrollbar.thumb_style),
         )
+    }
+}
+
+mod border_junctions {
+    use ratatui::buffer::Buffer;
+
+    /// Join horizontal rules to vertical borders in neighboring cells.
+    pub(super) fn join(buffer: &mut Buffer) {
+        let area = buffer.area;
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if buffer[(x, y)].symbol() != "─" {
+                    continue;
+                }
+                let above = y > area.top() && buffer[(x, y - 1)].symbol() == "│";
+                let below = y + 1 < area.bottom() && buffer[(x, y + 1)].symbol() == "│";
+                let junction = match (above, below) {
+                    (true, true) => "┼",
+                    (true, false) => "┴",
+                    (false, true) => "┬",
+                    (false, false) => continue,
+                };
+                buffer[(x, y)].set_symbol(junction);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use ratatui::{buffer::Buffer, layout::Rect};
+
+        use super::join;
+
+        #[test]
+        fn joins_only_rules_adjacent_to_vertical_borders() {
+            let mut buffer = Buffer::empty(Rect::new(3, 4, 4, 5));
+            for x in 3..7 {
+                buffer[(x, 4)].set_symbol("─");
+                buffer[(x, 8)].set_symbol("─");
+            }
+            for y in 5..8 {
+                buffer[(5, y)].set_symbol("│");
+            }
+            join(&mut buffer);
+            assert_eq!(buffer[(5, 4)].symbol(), "┬");
+            assert_eq!(buffer[(5, 8)].symbol(), "┴");
+            assert_eq!(buffer[(4, 4)].symbol(), "─");
+            assert_eq!(buffer[(5, 6)].symbol(), "│");
+        }
     }
 }

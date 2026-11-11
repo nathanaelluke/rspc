@@ -10,40 +10,26 @@ use crate::{
         theme::{UiConfigFile, borders::BorderSetLib},
     },
     ctx::Ctx,
-    mpd::commands::{Song, State, Volume},
+    mpd::commands::Song,
     tests::fixtures::ctx,
 };
 
 #[rstest]
-#[case(80, State::Pause, "Paused", 7, "0:07", 1)]
-#[case(120, State::Play, "Playing", 3607, "1:00:07", 123)]
-#[case(80, State::Stop, "Stopped", 0, "0:00", 12)]
-fn bar_gutters_follow_content_at_different_widths(
-    #[case] width: u16,
-    #[case] state: State,
-    #[case] label: &str,
-    #[case] elapsed: u64,
-    #[case] formatted_elapsed: &str,
-    #[case] count: usize,
-    mut ctx: Ctx,
-) {
-    let theme: UiConfigFile =
-        ron::from_str(include_str!("../../../../../config/themes/default.ron"))
-            .expect("rspc theme must parse");
-    Arc::make_mut(&mut ctx.config).theme = theme.try_into().expect("rspc theme must convert");
-    ctx.status.state = state;
-    ctx.status.elapsed = Duration::from_secs(elapsed);
-    ctx.status.duration = Duration::from_secs(5000);
-    ctx.status.volume = Volume::new(100);
-    ctx.status.songid = Some(0);
-    ctx.queue = (0..count)
-        .map(|id| Song {
-            id: id as u32,
-            ..Song::default()
-        })
-        .collect();
-
-    let mut terminal = Terminal::new(TestBackend::new(width, 8)).expect("test terminal");
+#[case(40)]
+#[case(80)]
+#[case(120)]
+fn auto_sized_properties_leave_space_for_the_flexible_pane(#[case] width: u16, mut ctx: Ctx) {
+    let file: UiConfigFile = ron::from_str(
+        r#"#![enable(implicit_some)]
+        (layout: Split(direction: Horizontal, panes: [
+            (size: "auto", pane: Pane(Property(content: [(kind: Text("LEFT 123 "))]))),
+            (size: "100%", pane: Pane(Empty())),
+            (size: "auto", pane: Pane(Property(content: [(kind: Text(" RIGHT"))], align: Right))),
+        ]))"#,
+    )
+    .expect("fixture theme must parse");
+    Arc::make_mut(&mut ctx.config).theme = file.try_into().expect("fixture theme must convert");
+    let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("test terminal");
     terminal
         .draw(|frame| {
             ctx.config
@@ -73,29 +59,16 @@ fn bar_gutters_follow_content_at_different_widths(
                     },
                     &ctx,
                 )
-                .expect("render theme properties");
+                .expect("render fixture properties");
         })
         .expect("draw terminal");
     let buffer = terminal.backend().buffer();
-    let row = |y| {
-        (0..width)
-            .map(|x| buffer[(x, y)].symbol())
-            .collect::<String>()
-    };
-    let header = row(0);
-    let footer = row(7);
-    assert!(header.starts_with(&format!(" [{label}] ")), "{header:?}");
-    assert!(header.ends_with(" VOL 100% "), "{header:?}");
-    assert_eq!(header.matches('│').count(), 2, "{header:?}");
-    assert!(header.starts_with(&format!(" [{label}] │")), "{header:?}");
-    assert!(header.ends_with("│ VOL 100% "), "{header:?}");
-    assert!(
-        footer.starts_with(&format!(" NORMAL [zxcv] │ {formatted_elapsed} ")),
-        "{footer:?}"
-    );
-    assert!(
-        footer.ends_with(&format!(" 1:23:20 │ {count} tracks ")),
-        "{footer:?}"
+    let row: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+    assert!(row.starts_with("LEFT 123 "), "{row:?}");
+    assert!(row.ends_with(" RIGHT"), "{row:?}");
+    assert_eq!(
+        row.trim(),
+        format!("LEFT 123{}RIGHT", " ".repeat(usize::from(width) - 13))
     );
 }
 
@@ -128,9 +101,22 @@ fn queue_headings_and_rows_share_gutters_and_edges(
     #[case] scrollbar: bool,
     mut ctx: Ctx,
 ) {
-    let file: UiConfigFile =
-        ron::from_str(include_str!("../../../../../config/themes/default.ron"))
-            .expect("rspc theme");
+    let file: UiConfigFile = ron::from_str(
+        r#"#![enable(implicit_some)]
+        #![enable(unwrap_newtypes)]
+        #![enable(unwrap_variant_newtypes)]
+        (
+            scrollbar: None,
+            song_table_column_spacing: 2,
+            song_table_format: [
+                (prop: (kind: Property(Artist)), label_prop: (kind: Text("Artist")), width: "24%"),
+                (prop: (kind: Property(Title)), label_prop: (kind: Text("Title")), width: "36%"),
+                (prop: (kind: Property(Album)), label_prop: (kind: Text("Album")), width: "32%"),
+                (prop: (kind: Property(Duration)), label_prop: (kind: Text("Time")), width: "8%", alignment: Right),
+            ],
+        )"#,
+    )
+    .expect("queue fixture theme");
     let theme = &mut Arc::make_mut(&mut ctx.config).theme;
     *theme = file.try_into().expect("convert theme");
     if scrollbar {

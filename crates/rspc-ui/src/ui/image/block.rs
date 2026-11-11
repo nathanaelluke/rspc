@@ -8,7 +8,7 @@ use crossterm::{
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
 };
 use image::DynamicImage;
-use ratatui::layout::Rect;
+use ratatui::{buffer::Buffer, layout::Rect, style::Color as RatatuiColor};
 
 use super::Backend;
 use crate::{
@@ -29,6 +29,56 @@ pub struct Data {
     #[debug(skip)]
     image: DynamicImage,
     aligned_area: AlignedArea,
+}
+
+impl Block {
+    /// Render into the terminal frame so popups can cover individual cells.
+    pub fn render(buffer: &mut Buffer, data: &Data) {
+        let image = data.image.to_rgba8();
+        let area = data.aligned_area.area;
+        // Some terminals do not report pixel dimensions. In that case, map
+        // the decoded image across the available cells instead of sampling 0x0.
+        let cell_width = if data.aligned_area.cell_width_px > 0.0 {
+            data.aligned_area.cell_width_px
+        } else {
+            f64::from(image.width()) / f64::from(area.width.max(1))
+        };
+        let cell_height = if data.aligned_area.cell_height_px > 0.0 {
+            data.aligned_area.cell_height_px / 2.0
+        } else {
+            f64::from(image.height()) / (2.0 * f64::from(area.height.max(1)))
+        };
+        let truecolor = truecolor_available();
+        for position in area.intersection(*buffer.area()).positions() {
+            let x = (f64::from(position.x - area.x) * cell_width) as u32;
+            let y = (f64::from(position.y - area.y) * 2.0 * cell_height) as u32;
+            let sample = |y| {
+                average_region_pixel(
+                    &image,
+                    x,
+                    y,
+                    (cell_width as u32).max(1),
+                    (cell_height as u32).max(1),
+                    image.width(),
+                    image.height(),
+                )
+            };
+            let top = sample(y);
+            let bottom =
+                sample((f64::from(position.y - area.y) * 2.0 * cell_height + cell_height) as u32);
+            let color = |pixel: image::Rgba<u8>| {
+                if truecolor {
+                    RatatuiColor::Rgb(pixel[0], pixel[1], pixel[2])
+                } else {
+                    RatatuiColor::Indexed(ansi256_from_rgb((pixel[0], pixel[1], pixel[2])))
+                }
+            };
+            buffer[position]
+                .set_symbol(LOWER_HALF_BLOCK)
+                .set_fg(color(bottom))
+                .set_bg(color(top));
+        }
+    }
 }
 
 impl Backend for Block {
@@ -118,7 +168,7 @@ impl Backend for Block {
     }
 }
 
-const LOWER_HALF_BLOCK: &str = "\u{2584}";
+pub(crate) const LOWER_HALF_BLOCK: &str = "\u{2584}";
 
 #[inline]
 fn average_region_pixel(
@@ -196,5 +246,69 @@ fn color_from_pixel(pixel: image::Rgba<u8>) -> Color {
         }
     } else {
         Color::AnsiValue(ansi256_from_rgb((pixel[0], pixel[1], pixel[2])))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend, widgets::Clear};
+
+    #[test]
+    fn popup_covers_only_overlapping_art_and_closing_restores_it() {
+        let data = Data {
+            image: DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                4,
+                4,
+                image::Rgba([200, 100, 20, 255]),
+            )),
+            aligned_area: AlignedArea {
+                area: Rect::new(0, 0, 4, 2),
+                size_px: Size {
+                    width: 4,
+                    height: 4,
+                },
+                cell_width_px: 1.0,
+                cell_height_px: 2.0,
+            },
+        };
+        let mut terminal = Terminal::new(TestBackend::new(4, 2)).expect("terminal");
+        let render = |frame: &mut ratatui::Frame, popup| {
+            Block::render(frame.buffer_mut(), &data);
+            if popup {
+                frame.render_widget(Clear, Rect::new(2, 0, 2, 2));
+            }
+        };
+        terminal.draw(|frame| render(frame, false)).expect("cover");
+        let original = terminal.backend().buffer().clone();
+        terminal.draw(|frame| render(frame, true)).expect("popup");
+        assert_eq!(terminal.backend().buffer()[(0, 0)], original[(0, 0)]);
+        assert_eq!(terminal.backend().buffer()[(2, 0)].symbol(), " ");
+        terminal.draw(|frame| render(frame, false)).expect("close");
+        assert_eq!(terminal.backend().buffer(), &original);
+    }
+
+    #[test]
+    fn renders_when_terminal_pixel_dimensions_are_unavailable() {
+        let data = Data {
+            image: DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                4,
+                4,
+                image::Rgba([255, 255, 255, 255]),
+            )),
+            aligned_area: AlignedArea {
+                area: Rect::new(0, 0, 4, 2),
+                size_px: Size {
+                    width: 4,
+                    height: 4,
+                },
+                cell_width_px: 0.0,
+                cell_height_px: 0.0,
+            },
+        };
+        let mut buffer = Buffer::empty(data.aligned_area.area);
+        Block::render(&mut buffer, &data);
+        assert_ne!(buffer[(0, 0)].fg, RatatuiColor::Indexed(16));
+        assert_eq!(buffer[(0, 0)].fg, buffer[(3, 1)].fg);
     }
 }
