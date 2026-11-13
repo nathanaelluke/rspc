@@ -118,7 +118,8 @@ jobs:
           unpacked=$(mktemp -d)
           tar -xzf "dist/rspc-$version-source.tar.gz" -C "$unpacked"
           cd "$unpacked/rspc-$version"
-          export CARGO_HOME=$(mktemp -d)
+          source_cargo_home=$(mktemp -d)
+          export CARGO_HOME="$source_cargo_home"
           cargo metadata --locked --offline --format-version 1 > "$RUNNER_TEMP/source-metadata.json"
           cargo build --locked --offline --release -j2 -p rspc -p rspc-ui
           ./target/release/rspc --version
@@ -136,3 +137,43 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" dist/* --verify-tag --draft \
             --title "rspc $RELEASE_TAG" --generate-notes
+
+  homebrew:
+    needs: assemble
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: Test generated cask on Apple Silicon
+        run: |
+          tar -xzf dist/package-recipes.tar.gz
+          tap="$RUNNER_TEMP/rspc-tap"
+          mkdir -p "$tap/Casks"
+          cp homebrew/Casks/rspc.rb "$tap/Casks/rspc.rb"
+          git -C "$tap" init -b main
+          git -C "$tap" add Casks/rspc.rb
+          git -C "$tap" -c user.name=Test -c user.email=test@example.org commit -m 'Test release cask'
+          brew tap nathanaelluke/rspc-release-test "$tap"
+          tap="$(brew --repository nathanaelluke/rspc-release-test)"
+          brew style --cask nathanaelluke/rspc-release-test/rspc
+          # Exercise the exact release archive before its download URL is public.
+          python3 - "$tap/Casks/rspc.rb" "$PWD/dist" <<'PY'
+          import pathlib, re, sys
+          cask = pathlib.Path(sys.argv[1])
+          text = cask.read_text()
+          version = re.search(r'^  version "([^"]+)"', text, re.M).group(1)
+          text = re.sub(
+              r'url "https://github.com/nathanaelluke/rspc/releases/download/[^/]+/(rspc-[^"]+)"',
+              lambda match: 'url "' + (pathlib.Path(sys.argv[2]) / match.group(1).replace('#{version}', version)).as_uri() + '"',
+              text,
+          )
+          cask.write_text(text)
+          PY
+          brew install --cask nathanaelluke/rspc-release-test/rspc
+          rspc --version
+          rspc-ui version
+          soloist --version
+          brew uninstall --cask nathanaelluke/rspc-release-test/rspc

@@ -828,12 +828,12 @@ invalid line without brackets
         let result: Lrc = input.parse().unwrap();
         assert_eq!(result.lines.len(), 8);
         // First 5 lines should all have "repeated chorus"
-        for i in 0..5 {
-            assert_eq!(result.lines[i].content, "repeated chorus");
+        for line in &result.lines[..5] {
+            assert_eq!(line.content, "repeated chorus");
         }
         // Next 3 lines should have "another repeated part"
-        for i in 5..8 {
-            assert_eq!(result.lines[i].content, "another repeated part");
+        for line in &result.lines[5..8] {
+            assert_eq!(line.content, "another repeated part");
         }
     }
 

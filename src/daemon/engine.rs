@@ -286,6 +286,10 @@ impl Engine {
     // Playback and queue mutations share the control lock. State reads only
     // need the short-lived player lock, even while a backend is connecting.
     async fn play_inner(&self, target: PlayTarget) -> Result<()> {
+        self.play_inner_at(target, 0).await
+    }
+
+    async fn play_inner_at(&self, target: PlayTarget, position_ms: u64) -> Result<()> {
         let (entry, sync_spotify_volume, volume) = {
             let p = self.player.lock().await;
             let index = target.index(&p.queue)?;
@@ -337,7 +341,7 @@ impl Engine {
             p.queue.current = Some(entry.id);
             p.stopped = false;
             p.playing = self.catalog.demo;
-            p.position_ms = 0;
+            p.position_ms = position_ms;
             p.last_tick = Instant::now();
             p.loading = (!self.catalog.demo).then(Instant::now);
             p.error.clear();
@@ -345,15 +349,25 @@ impl Engine {
             p.backend = Some(backend);
             p.request = request;
         }
-        if let Some(soloist) = soloist
-            && let Err(error) = soloist.load(uri).await
-        {
-            self.fail_inner(error.to_string()).await;
-            return Err(error);
+        if let Some(soloist) = soloist {
+            let result = async {
+                soloist.load(uri).await?;
+                if position_ms > 0 {
+                    soloist
+                        .seek(position_ms.min(u32::MAX as u64) as u32)
+                        .await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                self.fail_inner(error.to_string()).await;
+                return Err(error);
+            }
         }
         if let Some(local) = local {
             let request = request.context("missing local playback request")?;
-            if let Err(error) = local.load(uri, request, volume).await {
+            if let Err(error) = local.load(uri, request, volume, position_ms).await {
                 self.fail_inner(error.to_string()).await;
                 return Err(error);
             }
@@ -382,11 +396,9 @@ impl Engine {
         };
         if !pause && (state.stopped || backend.is_none()) {
             let index = self.player.lock().await.queue.cursor().unwrap_or(0);
-            self.play_inner(PlayTarget::Position(index)).await?;
-            if !state.stopped && state.position_ms > 0 {
-                self.seek_inner(state.position_ms as f64 / 1000.0, false)
-                    .await?;
-            }
+            let position_ms = if state.stopped { 0 } else { state.position_ms };
+            self.play_inner_at(PlayTarget::Position(index), position_ms)
+                .await?;
             return Ok(());
         }
         match backend {

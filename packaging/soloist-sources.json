@@ -1,16 +1,16 @@
 {
-  "checked": "2026-11-11",
+  "checked": "2026-11-13",
   "sources": {
     "aarch64-darwin": {
-      "sha256": "231cfd5cfc17908d7f2b05d7f39a433e3f370e594cb4ab0e6c2f562d04a069ed",
+      "sha256": "7df1654ff6a81421ee602a3064ed38f609d9bb8f2811c2fd3453c4702c38c824",
       "url": "https://soloist-builds.spotifycdn.com/soloist_release_osx_arm64.tar.gz"
     },
     "aarch64-linux": {
-      "sha256": "089f57aacfa7a03f0ad227be023b515f0bcf184623cf5296570b654b246276de",
+      "sha256": "2801355b367b0155136b4a13d3a0433fe151f3dafd894b44ac337cac294229b0",
       "url": "https://soloist-builds.spotifycdn.com/soloist_release_arm64.tar.gz"
     },
     "x86_64-linux": {
-      "sha256": "9217f93121d035739b778c955feaf591caaeacead23a7fe6b78676cfab22a787",
+      "sha256": "a24de8702c3e0992336bde229b228e876cc04cf34075a4384432ce780970ee40",
       "url": "https://soloist-builds.spotifycdn.com/soloist_release_x86_64.tar.gz"
     }
   },
