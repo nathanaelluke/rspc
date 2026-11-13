@@ -148,19 +148,21 @@ pub fn recipes(root: &Path, artifacts: &Path, output: &Path) -> Result<()> {
   version "{VERSION}"
 
   on_macos do
+    sha256 "{mac}"
+
+    url "{base}/rspc-#{{version}}-aarch64-apple-darwin.tar.gz"
+
     depends_on arch: :arm64
     depends_on macos: :ventura
-    sha256 "{mac}"
-    url "{base}/rspc-#{{version}}-aarch64-apple-darwin.tar.gz"
   end
   on_linux do
-    on_intel do
-      sha256 "{intel}"
-      url "{base}/rspc-#{{version}}-x86_64-unknown-linux-gnu.tar.gz"
-    end
     on_arm do
       sha256 "{arm}"
       url "{base}/rspc-#{{version}}-aarch64-unknown-linux-gnu.tar.gz"
+    end
+    on_intel do
+      sha256 "{intel}"
+      url "{base}/rspc-#{{version}}-x86_64-unknown-linux-gnu.tar.gz"
     end
   end
 

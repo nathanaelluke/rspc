@@ -11,15 +11,14 @@ one queue.
 Supports Linux x86-64, Linux AArch64 and Apple Silicon macOS 13 or newer. Native
 Windows and Spotify playback on Intel Macs are not supported.
 
-Homebrew publication is pending. Both packages below also install Spotify's
-Soloist player:
+Both packages below also install Spotify's Soloist player:
 
 | package manager      | command                                         |
 | -------------------- | ----------------------------------------------- |
 | Homebrew             | `brew install --cask nathanaelluke/tap/rspc`    |
 | Nix, from a checkout | `nix profile add .#rspc --max-jobs 1 --cores 1` |
 
-[GitHub Releases](https://github.com/nathanaelluke/rspc/releases) will provide
+[GitHub Releases](https://github.com/nathanaelluke/rspc/releases) provide
 binaries and `SHA256SUMS`. Verify your download, then copy both executables from
 `bin/` to a directory on PATH and the contents of `share/` to `~/.local/share/`.
 Linux binaries require OpenSSL 3 and glibc 2.35 on x86-64 or 2.39 on AArch64. On
