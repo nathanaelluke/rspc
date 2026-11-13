@@ -882,3 +882,29 @@ fn catalog_eviction_keeps_hot_pages_instead_of_emptying_the_cache() {
     assert!(cache.contains_key("new"));
     assert!(!cache.contains_key("1"));
 }
+
+#[tokio::test]
+async fn prefetching_new_detail_pages_does_not_reset_library_browsers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut catalog = Catalog::new(false);
+    catalog.disk_root = dir.path().join("catalog");
+    let catalog = Arc::new(catalog);
+    catalog
+        .cache_response(0, "detail", "artists/artist/albums", json!({"items":[1]}))
+        .await;
+    assert_eq!(catalog.content_revision.load(Ordering::Relaxed), 0);
+    catalog
+        .cache_response(0, "root", "me/following", json!({"artists":[]}))
+        .await;
+    assert_eq!(catalog.content_revision.load(Ordering::Relaxed), 1);
+    catalog
+        .cache_response(0, "detail", "artists/artist/albums", json!({"items":[2]}))
+        .await;
+    assert_eq!(catalog.content_revision.load(Ordering::Relaxed), 2);
+    catalog
+        .cache_response(0, "detail", "artists/artist/albums", json!({"items":[2]}))
+        .await;
+    assert_eq!(catalog.content_revision.load(Ordering::Relaxed), 2);
+    tokio::task::yield_now().await;
+    drop(catalog.disk_writes.lock().await);
+}

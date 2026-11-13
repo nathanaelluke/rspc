@@ -178,16 +178,25 @@ async fn request_reply(socket: &Path, command: &str) -> Result<String> {
     }
     Ok(output)
 }
-async fn running(socket: &Path) -> bool {
-    matches!(tokio::time::timeout(Duration::from_secs(1), request(socket, "rspc_identity")).await, Ok(Ok(reply)) if reply.contains("name: rspc\n"))
+async fn daemon_identity(socket: &Path) -> Option<String> {
+    match tokio::time::timeout(Duration::from_secs(1), request(socket, "rspc_identity")).await {
+        Ok(Ok(reply)) if reply.contains("name: rspc\n") => Some(reply),
+        _ => None,
+    }
+}
+
+async fn daemon_ready(socket: &Path, demo: bool) -> Result<bool> {
+    let Some(identity) = daemon_identity(socket).await else {
+        return Ok(false);
+    };
+    anyhow::ensure!(
+        identity.contains(&format!("demo: {}\n", u8::from(demo))),
+        "socket belongs to a different rspc mode; choose another socket"
+    );
+    Ok(true)
 }
 async fn start_daemon(args: &Args, paths: &Paths) -> Result<()> {
-    if running(&paths.socket).await {
-        let identity = request(&paths.socket, "rspc_identity").await?;
-        anyhow::ensure!(
-            identity.contains(&format!("demo: {}\n", u8::from(args.demo))),
-            "socket belongs to a different rspc mode; choose another socket"
-        );
+    if daemon_ready(&paths.socket, args.demo).await? {
         return Ok(());
     }
     let log = fs::OpenOptions::new()
@@ -223,12 +232,7 @@ async fn start_daemon(args: &Args, paths: &Paths) -> Result<()> {
     }
     let mut child = child.spawn()?;
     for _ in 0..100 {
-        if running(&paths.socket).await {
-            let identity = request(&paths.socket, "rspc_identity").await?;
-            anyhow::ensure!(
-                identity.contains(&format!("demo: {}\n", u8::from(args.demo))),
-                "socket belongs to a different rspc mode; choose another socket"
-            );
+        if daemon_ready(&paths.socket, args.demo).await? {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
@@ -299,7 +303,7 @@ async fn main() -> Result<()> {
             repair: true,
         }) => {
             anyhow::ensure!(!args.demo, "Spotify login is unavailable in demo mode");
-            if running(&paths.socket).await {
+            if daemon_identity(&paths.socket).await.is_some() {
                 stop(&paths).await?;
             }
             login(&args, &paths).await
@@ -315,7 +319,7 @@ async fn main() -> Result<()> {
         Some(Commands::Stop) => stop(&paths).await,
         Some(Commands::Login { catalog: true, .. }) => {
             anyhow::ensure!(
-                !running(&paths.socket).await,
+                daemon_identity(&paths.socket).await.is_none(),
                 "Stop the daemon with `rspc stop` before changing the Spotify login."
             );
             rspc::catalog_login().await
@@ -372,7 +376,7 @@ async fn pair(args: &Args, paths: &Paths) -> Result<()> {
 
 async fn login(args: &Args, paths: &Paths) -> Result<()> {
     anyhow::ensure!(!args.demo, "Spotify login is unavailable in demo mode");
-    if running(&paths.socket).await {
+    if daemon_identity(&paths.socket).await.is_some() {
         anyhow::ensure!(
             request(&paths.socket, "commands")
                 .await?

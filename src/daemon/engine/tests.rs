@@ -1,12 +1,89 @@
 use super::*;
 
-#[tokio::test]
-async fn queued_play_ids_survive_an_earlier_queue_reorder() {
+async fn fixture() -> (tempfile::TempDir, Arc<Engine>) {
     let dir = tempfile::tempdir().unwrap();
-    let (tx, _) = mpsc::unbounded_channel();
-    let engine = Engine::new(true, dir.path().join("q.json"), tx)
+    let engine = Engine::new(true, dir.path().join("q.json"), mpsc::unbounded_channel().0)
         .await
         .unwrap();
+    (dir, engine)
+}
+
+#[tokio::test]
+async fn deferred_seeks_leave_spotify_untouched() {
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket
+            .send(Message::Text(
+                json!({"type":"auth_state", "logged_in":true, "is_active":true})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let request = loop {
+            let request = tokio::time::timeout(Duration::from_millis(200), socket.next()).await;
+            if let Ok(Some(Ok(Message::Text(text)))) = &request
+                && serde_json::from_str::<serde_json::Value>(text).unwrap()["command"]
+                    == "get_state"
+            {
+                continue;
+            }
+            break request;
+        };
+        if request.is_ok() {
+            socket
+                .send(Message::Text(
+                    json!({"type":"error", "message":"unexpected backend command"})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        }
+        assert!(
+            request.is_err(),
+            "deferred selection sent a backend command: {request:?}"
+        );
+    });
+    let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, _updates) = mpsc::unbounded_channel();
+    let engine = Engine::new(true, dir.path().join("q.json"), tx.clone())
+        .await
+        .unwrap();
+    engine.play(0).await.unwrap();
+    let soloist = Arc::new(Soloist::test_connection(socket, tx));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !soloist.logged_in() {
+        assert!(Instant::now() < deadline);
+        tokio::task::yield_now().await;
+    }
+    *engine.soloist.write().await = Some(soloist);
+    {
+        let mut player = engine.player.lock().await;
+        player.backend = None;
+        player.playing = false;
+        player.queue.entries[0].track.uri = Some("mpd:deferred.wav".into());
+    }
+    engine.seek(3.0, false).await.unwrap();
+    let state = engine.playback().await;
+    assert!(!state.playing && !state.stopped);
+    assert_eq!(state.position_ms, 3000);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_play_ids_survive_an_earlier_queue_reorder() {
+    let (_dir, engine) = fixture().await;
     let control = engine.control.lock().await;
     let pending_engine = Arc::clone(&engine);
     let (started, ready) = tokio::sync::oneshot::channel();
@@ -29,11 +106,7 @@ async fn queued_play_ids_survive_an_earlier_queue_reorder() {
 
 #[tokio::test]
 async fn delayed_end_events_do_not_advance_a_new_play_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let (tx, _) = mpsc::unbounded_channel();
-    let engine = Engine::new(true, dir.path().join("q.json"), tx)
-        .await
-        .unwrap();
+    let (_dir, engine) = fixture().await;
     engine.play(0).await.unwrap();
     engine.player.lock().await.request = Some(7);
     let control = engine.control.lock().await;
@@ -169,11 +242,7 @@ async fn slow_playback_controls_leave_player_state_readable() {
 }
 #[tokio::test]
 async fn failed_natural_handoff_stops_and_reports_the_error_without_skipping() {
-    let dir = tempfile::tempdir().unwrap();
-    let (tx, _) = mpsc::unbounded_channel();
-    let engine = Engine::new(true, dir.path().join("q.json"), tx)
-        .await
-        .unwrap();
+    let (_dir, engine) = fixture().await;
     engine.player.lock().await.queue.entries[1].track.uri = Some("unavailable:source".into());
     engine.play(0).await.unwrap();
     let id = engine.player.lock().await.queue.current;
@@ -186,11 +255,7 @@ async fn failed_natural_handoff_stops_and_reports_the_error_without_skipping() {
 }
 #[tokio::test]
 async fn source_and_request_guards_keep_late_events_out_of_the_shared_player() {
-    let dir = tempfile::tempdir().unwrap();
-    let (tx, _) = mpsc::unbounded_channel();
-    let engine = Engine::new(true, dir.path().join("q.json"), tx)
-        .await
-        .unwrap();
+    let (_dir, engine) = fixture().await;
     let mut track = super::super::catalog::demo_tracks().remove(0);
     track.uri = Some("mpd:fixture.wav".into());
     track.duration_ms = 0;
@@ -252,11 +317,7 @@ async fn source_and_request_guards_keep_late_events_out_of_the_shared_player() {
 }
 #[tokio::test]
 async fn mixed_queue_repeat_single_and_consume_keep_stable_entry_ids() {
-    let dir = tempfile::tempdir().unwrap();
-    let (tx, _) = mpsc::unbounded_channel();
-    let engine = Engine::new(true, dir.path().join("q.json"), tx)
-        .await
-        .unwrap();
+    let (_dir, engine) = fixture().await;
     {
         let mut p = engine.player.lock().await;
         p.queue.entries[1].track.uri = Some("mpd:local.wav".into());
@@ -293,11 +354,7 @@ fn external(track: crate::model::TrackInfo, playing: bool) -> AudioEvent {
 }
 #[tokio::test]
 async fn initial_remote_snapshot_updates_real_mpd_status_and_preserves_the_queue() {
-    let dir = tempfile::tempdir().unwrap();
-    let (tx, _) = mpsc::unbounded_channel();
-    let engine = Engine::new(true, dir.path().join("q.json"), tx)
-        .await
-        .unwrap();
+    let (dir, engine) = fixture().await;
     engine.soloist_epoch.store(1, Ordering::Relaxed);
     engine.player.lock().await.error = "old pairing error".into();
     let original = engine.player.lock().await.queue.clone();
@@ -356,11 +413,7 @@ async fn initial_remote_snapshot_updates_real_mpd_status_and_preserves_the_queue
 }
 #[tokio::test]
 async fn remote_sync_keeps_current_duplicate_id_and_local_play_takes_over() {
-    let dir = tempfile::tempdir().unwrap();
-    let (tx, _) = mpsc::unbounded_channel();
-    let engine = Engine::new(true, dir.path().join("q.json"), tx)
-        .await
-        .unwrap();
+    let (_dir, engine) = fixture().await;
     let track = super::super::catalog::demo_tracks().remove(0);
     let id = engine
         .player
@@ -383,11 +436,7 @@ async fn remote_sync_keeps_current_duplicate_id_and_local_play_takes_over() {
 }
 #[tokio::test]
 async fn stale_player_and_pending_load_snapshots_cannot_replace_current_selection() {
-    let dir = tempfile::tempdir().unwrap();
-    let (tx, _) = mpsc::unbounded_channel();
-    let engine = Engine::new(true, dir.path().join("q.json"), tx)
-        .await
-        .unwrap();
+    let (_dir, engine) = fixture().await;
     engine.soloist_epoch.store(2, Ordering::Relaxed);
     let track = super::super::catalog::demo_tracks().remove(0);
     engine
@@ -416,11 +465,7 @@ async fn stale_player_and_pending_load_snapshots_cannot_replace_current_selectio
 }
 #[tokio::test]
 async fn playback_failure_stops_without_skipping_or_rewriting_queue() {
-    let dir = tempfile::tempdir().unwrap();
-    let (tx, _) = mpsc::unbounded_channel();
-    let engine = Engine::new(true, dir.path().join("q.json"), tx)
-        .await
-        .unwrap();
+    let (_dir, engine) = fixture().await;
     engine.play(0).await.unwrap();
     let before = engine.player.lock().await.queue.clone();
     engine

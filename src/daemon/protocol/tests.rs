@@ -51,49 +51,6 @@ fn command_lists_limit_total_bytes_as_well_as_command_count() {
     assert_eq!(list.bytes, MAX_COMMAND_LIST_BYTES);
 }
 
-#[tokio::test]
-async fn artwork_downloads_are_bounded_without_a_content_length() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut connection, _) = listener.accept().await.unwrap();
-        // Reading one request line suffices for this deliberately incomplete
-        // HTTP fixture; the response body ends when its connection closes.
-        let mut request = BufReader::new(&mut connection);
-        let mut line = String::new();
-        request.read_line(&mut line).await.unwrap();
-        connection
-            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
-        let chunk = vec![0; 1024 * 1024];
-        for _ in 0..17 {
-            if connection.write_all(&chunk).await.is_err() {
-                break;
-            }
-        }
-    });
-    let response = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap()
-        .get(format!("http://{address}/cover"))
-        .send()
-        .await
-        .unwrap();
-    assert!(response.content_length().is_none());
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2), artwork_bytes(response))
-        .await
-        .unwrap();
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("artwork is too large")
-    );
-    server.await.unwrap();
-}
-
 async fn fixture() -> (tempfile::TempDir, Arc<Engine>) {
     let dir = tempfile::tempdir().unwrap();
     let engine = Engine::new(
@@ -117,6 +74,34 @@ async fn rejected_seek_does_not_change_the_track_or_start_playback() {
         assert_eq!(state.entry.unwrap().id, 1, "{command}");
         assert!(!state.playing, "{command}");
     }
+}
+
+#[tokio::test]
+async fn seeking_a_stopped_track_starts_playback() {
+    let (_dir, engine) = fixture().await;
+    for command in ["playid 1", "stop", "seekid 1 3"] {
+        execute(&engine, &words(command).unwrap()).await.unwrap();
+    }
+    let state = engine.playback().await;
+    assert!(state.playing && !state.stopped);
+    assert_eq!(state.entry.unwrap().id, 1);
+    assert!(state.position_ms >= 3000);
+}
+
+#[tokio::test]
+async fn boolean_modes_reject_oneshot() {
+    let (_dir, engine) = fixture().await;
+    for command in ["repeat oneshot", "random oneshot"] {
+        assert!(execute(&engine, &words(command).unwrap()).await.is_err());
+        let player = engine.player.lock().await;
+        assert!(!player.repeat && !player.random);
+    }
+    for command in ["single oneshot", "consume oneshot"] {
+        execute(&engine, &words(command).unwrap()).await.unwrap();
+    }
+    let player = engine.player.lock().await;
+    assert_eq!(player.single, 2);
+    assert!(player.queue.consume && player.queue.consume_oneshot);
 }
 
 #[tokio::test]

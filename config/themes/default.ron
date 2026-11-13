@@ -110,12 +110,13 @@
                 size: "1",
                 background_color: "#191919",
                 pane: Split(direction: Horizontal, panes: [
+                    (size: "10", pane: Component("state")),
+                    (size: "1", pane: Component("separator")),
                     (size: "1", pane: Pane(Empty())),
-                    (size: "9", pane: Component("state")),
                     (size: "100%", pane: Component("song_info")),
                     (size: "1", pane: Pane(Empty())),
-                    (size: "9", pane: Component("volume")),
-                    (size: "1", pane: Pane(Empty())),
+                    (size: "1", pane: Component("separator")),
+                    (size: "10", pane: Component("volume")),
                 ]),
             ),
             (
@@ -142,14 +143,15 @@
                 pane: Split(
                     direction: Horizontal,
                     panes: [
-                        (size: "auto", pane: Component("input_mode")),
-                        (size: "auto", pane: Component("states")),
+                        (size: "15", pane: Component("footer_status")),
                         (size: "1", pane: Component("separator")),
-                        (size: "auto", pane: Component("footer_elapsed")),
-                        (size: "100%", pane: Component("progress_bar")),
-                        (size: "auto", pane: Component("footer_duration")),
+                        (size: "100%", pane: Split(direction: Horizontal, panes: [
+                            (size: "auto", pane: Component("footer_elapsed")),
+                            (size: "100%", pane: Component("progress_bar")),
+                            (size: "auto", pane: Component("footer_duration")),
+                        ])),
                         (size: "1", pane: Component("separator")),
-                        (size: "auto", pane: Component("footer_queue")),
+                        (size: "15", pane: Component("footer_queue")),
                     ]
                 ),
             ),
@@ -158,12 +160,14 @@
     components: {
         "state": Pane(Property(
             content: [
+                (kind: Text(" ")),
                 (kind: Property(Status(StateV2(
                     playing_label: "PLAYING",
                     paused_label: "PAUSED",
                     stopped_label: "STOPPED",
                 ))), style: (fg: "#a0a0a0")),
-            ], align: Left,
+                (kind: Text(" ")),
+            ], align: Center,
         )),
         "song_info": Pane(Property(
             content: [
@@ -174,13 +178,13 @@
                 ),
                 (
                     kind: Group([
-                        (kind: Text("  ·  "), style: (fg: "#606060")),
+                        (kind: Text(" · "), style: (fg: "#606060")),
                         (kind: Property(Song(Artist)), style: (fg: "#b0b0b0")),
                     ]),
                 ),
                 (
                     kind: Group([
-                        (kind: Text("  ·  "), style: (fg: "#606060")),
+                        (kind: Text(" · "), style: (fg: "#606060")),
                         (kind: Property(Song(Album)), style: (fg: "#858585")),
                     ]),
                 ),
@@ -198,10 +202,39 @@
         ]),
         "volume": Pane(Property(
             content: [
+                (kind: Text(" ")),
                 (kind: Text("VOL "), style: (fg: "#808080")),
                 (kind: Property(Status(Volume)), style: (fg: "#b0b0b0")),
                 (kind: Text("%"), style: (fg: "#b0b0b0")),
-            ], align: Right,
+                (kind: Text(" ")),
+            ], align: Center,
+        )),
+        "footer_status": Split(direction: Horizontal, panes: [
+            (size: "1", pane: Pane(Empty())),
+            (size: "6", pane: Component("input_mode")),
+            (size: "1", pane: Pane(Empty())),
+            (size: "6", pane: Component("states")),
+            (size: "1", pane: Pane(Empty())),
+        ]),
+        "input_mode": Pane(Property(
+            content: [
+                (kind: Transform(Truncate(
+                    content: (kind: Transform(Replace(
+                        content: (kind: Property(Status(InputBuffer())), style: (fg: "#b0b0b0")),
+                        replacements: [
+                            (match: "", replace: (kind: Transform(Replace(
+                                content: (kind: Property(Status(InputMode()))),
+                                replacements: [
+                                    (match: "Normal", replace: (kind: Text("NORMAL"), style: (fg: "#a0a0a0"))),
+                                    (match: "Insert", replace: (kind: Text("INSERT"), style: (fg: "#eeeeee", modifiers: "Bold"))),
+                                ],
+                            )))),
+                        ],
+                    ))),
+                    length: 6,
+                    from_start: true,
+                ))),
+            ], align: Center,
         )),
         "states": Pane(Property(
             content: [
@@ -228,29 +261,11 @@
                     off_style: (fg: "#606060"),
                     oneshot_style: (fg: "#eeeeee"),
                 )))),
-                (kind: Text("] "), style: (fg: "#606060")),
-            ], align: Left,
-        )),
-        "input_mode": Pane(Property(
-            content: [
-                (kind: Text(" ")),
-                (kind: Transform(Replace(
-                    content: (kind: Property(Status(InputBuffer())), style: (fg: "#b0b0b0")),
-                    replacements: [
-                        (match: "", replace: (kind: Transform(Replace(
-                            content: (kind: Property(Status(InputMode()))),
-                            replacements: [
-                                (match: "Normal", replace: (kind: Text("NORMAL"), style: (fg: "#a0a0a0"))),
-                                (match: "Insert", replace: (kind: Text("INSERT"), style: (fg: "#eeeeee", modifiers: "Bold"))),
-                            ],
-                        )))),
-                    ],
-                ))),
-                (kind: Text(" ")),
-            ], align: Left
+                (kind: Text("]"), style: (fg: "#606060")),
+            ], align: Center
         )),
         "separator": Pane(Property(
-            content: [(kind: Text("│"), style: (fg: "#404040"))],
+            content: [(kind: Text("|"), style: (fg: "#404040"))],
             align: Center,
         )),
         "footer_elapsed": Pane(Property(
@@ -258,21 +273,22 @@
                 (kind: Text(" ")),
                 (kind: Property(Status(Elapsed)), style: (fg: "#d4d4d4")),
                 (kind: Text(" ")),
-            ], align: Left,
+            ], align: Center,
         )),
         "footer_duration": Pane(Property(
             content: [
                 (kind: Text(" ")),
                 (kind: Property(Status(Duration)), style: (fg: "#909090")),
                 (kind: Text(" ")),
-            ], align: Left,
+            ], align: Center,
         )),
         "footer_queue": Pane(Property(
             content: [
                 (kind: Text(" ")),
                 (kind: Property(Status(QueueLength())), style: (fg: "#b0b0b0")),
-                (kind: Text(" tracks "), style: (fg: "#909090")),
-            ], align: Left,
+                (kind: Text(" tracks"), style: (fg: "#909090")),
+                (kind: Text(" ")),
+            ], align: Center,
         )),
         "progress_bar": Pane(ProgressBar),
     },

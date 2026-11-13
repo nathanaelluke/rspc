@@ -1,4 +1,4 @@
-//! Optional lyric fetching and LRC export, independent of the displayed layout.
+//! Spotify lyrics and LRC caching.
 use super::{client::Client, request};
 use anyhow::{Context, Result};
 use librespot_core::{SpotifyId, error::ErrorKind};

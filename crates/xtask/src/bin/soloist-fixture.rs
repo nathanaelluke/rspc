@@ -49,12 +49,15 @@ async fn main() -> Result<()> {
             .clone(),
     );
     std::fs::create_dir_all(&data)?;
+    std::fs::write(data.join("soloist.pid"), std::process::id().to_string())?;
+    if let Some(delay) = read(data.join("fixture-startup-delay.json")).and_then(|v| v.as_f64()) {
+        tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+    }
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     std::fs::write(
         data.join("ws.port"),
         listener.local_addr()?.port().to_string(),
     )?;
-    std::fs::write(data.join("soloist.pid"), std::process::id().to_string())?;
     let mut state = Player {
         uri: String::new(),
         status: "idle".into(),

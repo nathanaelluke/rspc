@@ -89,7 +89,7 @@ pub async fn run_daemon(options: DaemonOptions) -> Result<()> {
                 if progress.changed {
                     notify.changed(vec!["database"]);
                 }
-                let delay = if progress.pending { 30 } else { 15 * 60 };
+                let delay = if progress.pending { 5 } else { 15 * 60 };
                 tokio::time::sleep(Duration::from_secs(delay)).await;
             }
         });

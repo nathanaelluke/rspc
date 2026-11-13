@@ -29,15 +29,6 @@ impl Catalog {
                 return Ok(view.page.clone());
             }
         }
-        let gate = self
-            .request_gate(&format!("artist-page:{name}:{offset}"))
-            .await;
-        let _guard = gate.lock().await;
-        if let Some(view) = self.artist_pages.lock().await.get(&key)
-            && view.fetched.elapsed() < Duration::from_secs(300)
-        {
-            return Ok(view.page.clone());
-        }
         let Some(id) = self.artist_id(name).await? else {
             return Ok(ArtistAlbumPage {
                 total: Some(0),
@@ -54,6 +45,16 @@ impl Catalog {
                 ],
             )
             .await?;
+        // Cached readers must not wait behind a background network refresh.
+        let gate = self
+            .request_gate(&format!("artist-page:{name}:{offset}"))
+            .await;
+        let _guard = gate.lock().await;
+        if let Some(view) = self.artist_pages.lock().await.get(&key)
+            && view.fetched.elapsed() < Duration::from_secs(300)
+        {
+            return Ok(view.page.clone());
+        }
         let albums = page["items"].as_array().context("missing artist albums")?;
         let total = page["total"]
             .as_u64()

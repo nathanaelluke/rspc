@@ -449,7 +449,7 @@ impl Soloist {
             .context("starting Soloist")?;
         let id = child.id().context("Soloist has no process id")?.to_string();
         let start = Instant::now();
-        let endpoint = loop {
+        let (endpoint, socket) = loop {
             if let Some(status) = child.try_wait()? {
                 bail!(
                     "Soloist exited with {status}; check ~/.local/state/rspc/soloist.log (exit 10 means update required)"
@@ -462,7 +462,16 @@ impl Soloist {
                 && let Ok(port) = tokio::fs::read_to_string(data.join("ws.port")).await
                 && let Ok(port) = port.trim().parse::<u16>()
             {
-                break format!("ws://127.0.0.1:{port}");
+                // The PID can change before the port file or listener is ready.
+                let endpoint = format!("ws://127.0.0.1:{port}");
+                if let Ok(Ok((socket, _))) = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    tokio_tungstenite::connect_async(&endpoint),
+                )
+                .await
+                {
+                    break (endpoint, socket);
+                }
             }
             ensure!(
                 start.elapsed() < Duration::from_secs(12),
@@ -470,9 +479,6 @@ impl Soloist {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
-        let (socket, _) = tokio_tungstenite::connect_async(&endpoint)
-            .await
-            .context("connecting to Soloist local API")?;
         let soloist = Self::from_socket(epoch, socket, Some(endpoint), Some(child), tx);
         let start = Instant::now();
         while !soloist.state.lock().unwrap().received_auth {

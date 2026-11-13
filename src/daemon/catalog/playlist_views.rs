@@ -58,9 +58,7 @@ impl Catalog {
         let tracks = tokio::task::spawn_blocking(move || {
             items
                 .iter()
-                .filter_map(|item| {
-                    track_from_json(&item["item"]).or_else(|| track_from_json(&item["track"]))
-                })
+                .filter_map(track_from_playlist_item)
                 .collect::<Vec<_>>()
         })
         .await?;
@@ -101,7 +99,7 @@ impl Catalog {
         self: &Arc<Self>,
         path: &str,
         offset: usize,
-    ) -> Result<Option<usize>> {
+    ) -> Result<(Option<usize>, Vec<String>)> {
         let page = self
             .get(
                 path,
@@ -110,13 +108,20 @@ impl Catalog {
             .await?;
         let total = page["total"].as_u64().unwrap_or(0);
         if total > MAX_TRACKS as u64 {
-            return Ok(None);
+            return Ok((None, Vec::new()));
         }
+        let artwork = page["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(track_from_playlist_item)
+            .filter_map(|track| track.image_url)
+            .collect();
         if (offset as u64 + 100) < total {
-            Ok(Some(offset + 100))
+            Ok((Some(offset + 100), artwork))
         } else {
             self.playlist_view(path).await?;
-            Ok(None)
+            Ok((None, artwork))
         }
     }
 }

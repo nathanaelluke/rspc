@@ -132,12 +132,7 @@ impl Catalog {
                     "invalid playlist ID"
                 );
                 let items = self.pages(&format!("playlists/{id}/tracks")).await?;
-                let tracks = items
-                    .iter()
-                    .filter_map(|item| {
-                        track_from_json(&item["item"]).or_else(|| track_from_json(&item["track"]))
-                    })
-                    .collect();
+                let tracks = items.iter().filter_map(track_from_playlist_item).collect();
                 Ok((vec![], self.remember(tracks).await))
             }
             _ => bail!("unknown person or playlist"),

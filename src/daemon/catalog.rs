@@ -1,5 +1,6 @@
 mod artist_albums;
 mod artist_views;
+mod artwork;
 mod background;
 mod browse;
 mod people;
@@ -89,6 +90,7 @@ pub struct Catalog {
     pub playlist_settings: std::sync::Mutex<crate::config::PlaylistSettings>,
     pub local: Arc<super::local::Library>,
     pub tracks: Mutex<HashMap<String, TrackInfo>>,
+    artwork: Mutex<artwork::Memory>,
     albums: Mutex<HashMap<String, Value>>,
     playlists: Mutex<BTreeMap<String, String>>,
     cache: Mutex<HashMap<String, Arc<Cached>>>,
@@ -97,7 +99,7 @@ pub struct Catalog {
     limit: Semaphore,
     foreground: AtomicUsize,
     content_revision: AtomicU64,
-    warming: Mutex<std::collections::VecDeque<background::WarmItem>>,
+    warming: Mutex<background::WarmPlan>,
     generation: AtomicU64,
     playlist_view_epoch: AtomicU64,
     playlist_views: Mutex<HashMap<String, playlist_views::PlaylistView>>,
@@ -149,6 +151,7 @@ impl Catalog {
             versions: std::sync::Mutex::new(versions),
             demo_playlists: Mutex::new(BTreeMap::from([("Demo Mix".into(), demo_tracks())])),
             tracks: Mutex::new(HashMap::new()),
+            artwork: Mutex::new(Default::default()),
             albums: Mutex::new(HashMap::new()),
             playlists: Mutex::new(BTreeMap::new()),
             cache: Mutex::new(HashMap::new()),
@@ -250,6 +253,16 @@ impl Catalog {
                 return Err(error);
             }
         };
+        Ok(self.cache_response(generation, key, path, value).await)
+    }
+
+    async fn cache_response(
+        self: &Arc<Self>,
+        generation: u64,
+        key: &str,
+        path: &str,
+        value: Value,
+    ) -> Value {
         let entry = Arc::new(Cached {
             used: Default::default(),
             fetched: now(),
@@ -257,10 +270,16 @@ impl Catalog {
         });
         let mut cache = self.cache.lock().await;
         if generation == self.generation.load(Ordering::Relaxed) {
-            if cache
-                .get(key)
-                .is_none_or(|previous| previous.value != value)
-            {
+            let library_changed = cache.get(key).map_or_else(
+                || {
+                    matches!(
+                        path,
+                        "me/playlists" | "me/albums" | "me/tracks" | "me/following"
+                    )
+                },
+                |previous| previous.value != value,
+            );
+            if library_changed {
                 self.content_revision.fetch_add(1, Ordering::Relaxed);
             }
             cache_insert(&mut cache, key.to_owned(), entry.clone());
@@ -280,7 +299,7 @@ impl Catalog {
                 }
             });
         }
-        Ok(value)
+        value
     }
 
     async fn persist_entry(&self, key: &str, generation: u64, entry: Arc<Cached>) -> Result<()> {
@@ -928,6 +947,10 @@ impl Catalog {
 pub fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
+fn track_from_playlist_item(item: &Value) -> Option<TrackInfo> {
+    track_from_json(&item["item"]).or_else(|| track_from_json(&item["track"]))
+}
+
 pub fn track_from_json(v: &Value) -> Option<TrackInfo> {
     let uri = v["uri"].as_str()?.to_string();
     if !uri.starts_with("spotify:track:") {

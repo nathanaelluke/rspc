@@ -123,9 +123,7 @@ impl Catalog {
             .iter()
             .enumerate()
             .filter_map(|(p, item)| {
-                track_from_json(&item["item"])
-                    .or_else(|| track_from_json(&item["track"]))
-                    .and_then(|t| t.uri.map(|u| (p, u)))
+                track_from_playlist_item(item).and_then(|t| t.uri.map(|u| (p, u)))
             })
             .collect())
     }

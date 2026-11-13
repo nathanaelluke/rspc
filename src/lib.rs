@@ -23,7 +23,7 @@ pub async fn catalog_login() -> anyhow::Result<()> {
     println!("Spotify login saved.");
     Ok(())
 }
-/// One interactive catalog authorization also authorizes the audio receiver.
+/// Ensure catalog credentials and Soloist prerequisites are available.
 pub async fn ensure_catalog_login() -> anyhow::Result<()> {
     anyhow::ensure!(
         soloist::binary().is_file(),

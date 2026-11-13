@@ -93,14 +93,7 @@ pub fn parse(input: &str) -> Result<Vec<Predicate>> {
 fn visit_values(track: &TrackInfo, tag: &str, mut visit: impl FnMut(&str)) -> Result<()> {
     match tag {
         "artist" => track.artists.iter().for_each(|value| visit(value)),
-        "albumartist" => {
-            let artists = if track.album_artists.is_empty() {
-                &track.artists
-            } else {
-                &track.album_artists
-            };
-            artists.iter().for_each(|value| visit(value));
-        }
+        "albumartist" => track.album_artists().iter().for_each(|value| visit(value)),
         "album" => visit(&track.album),
         "genre" => track.genres.iter().for_each(|value| visit(value)),
         "title" => visit(&track.name),

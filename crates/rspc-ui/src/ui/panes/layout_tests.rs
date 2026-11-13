@@ -72,6 +72,151 @@ fn auto_sized_properties_leave_space_for_the_flexible_pane(#[case] width: u16, m
     );
 }
 
+fn load_default_theme(ctx: &mut Ctx) {
+    let theme: UiConfigFile =
+        ron::from_str(include_str!("../../../../../config/themes/default.ron"))
+            .expect("default theme");
+    Arc::make_mut(&mut ctx.config).theme = theme.try_into().expect("convert default theme");
+}
+
+fn render_bars(ctx: &Ctx, width: u16) -> (Vec<Rect>, [String; 2]) {
+    use super::progress_bar::ProgressBarPane;
+
+    let mut terminal = Terminal::new(TestBackend::new(width, 35)).expect("test terminal");
+    let mut areas = Vec::new();
+    terminal
+        .draw(|frame| {
+            ctx.config
+                .theme
+                .layout
+                .for_each_pane(
+                    frame.area(),
+                    &mut |pane, area, _, _, _| {
+                        if area.y != 0 && area.y != 34 {
+                            return Ok(());
+                        }
+                        areas.push(area);
+                        match &pane.pane {
+                            PaneType::Property {
+                                content,
+                                align,
+                                scroll_speed,
+                                wrap,
+                                vertical_align,
+                            } => {
+                                PropertyPane::new(
+                                    content,
+                                    *align,
+                                    u64::from(*scroll_speed),
+                                    *wrap,
+                                    *vertical_align,
+                                )
+                                .render(frame, area, ctx)?;
+                            }
+                            PaneType::ProgressBar => {
+                                ProgressBarPane::new().render(frame, area, ctx)?;
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    },
+                    ctx,
+                )
+                .expect("render bars");
+        })
+        .expect("draw bars");
+    areas.sort_by_key(|area| (area.y, area.x));
+    let rows = [0, 34].map(|y| {
+        (0..width)
+            .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+            .collect()
+    });
+    (areas, rows)
+}
+
+#[rstest]
+#[case(80)]
+#[case(120)]
+#[case(180)]
+fn playback_and_volume_changes_do_not_move_the_bars(#[case] width: u16, mut ctx: Ctx) {
+    use crate::mpd::commands::{State, Volume};
+
+    load_default_theme(&mut ctx);
+    let (initial, _) = render_bars(&ctx, width);
+    for (state, label) in [
+        (State::Play, "PLAYING"),
+        (State::Pause, "PAUSED"),
+        (State::Stop, "STOPPED"),
+    ] {
+        ctx.status.state = state;
+        for volume in [0, 9, 10, 99, 100] {
+            ctx.status.volume = Volume::new(volume);
+            let (areas, [header, _]) = render_bars(&ctx, width);
+            assert_eq!(
+                areas, initial,
+                "state {state:?}, volume {volume} moved a section"
+            );
+            assert_eq!(
+                header.split('|').next().expect("state section").trim(),
+                label
+            );
+            assert_eq!(
+                header.rsplit('|').next().expect("volume section").trim(),
+                format!("VOL {volume}%")
+            );
+        }
+    }
+}
+
+#[rstest]
+#[case(80)]
+#[case(120)]
+#[case(180)]
+fn commands_replace_the_mode_without_moving_the_footer(#[case] width: u16, mut ctx: Ctx) {
+    use crate::{
+        config::keys::{CommonAction, Key},
+        shared::keys::KeyResolver,
+    };
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    load_default_theme(&mut ctx);
+    let config = Arc::make_mut(&mut ctx.config);
+    let key = |ch| Key {
+        key: KeyCode::Char(ch),
+        modifiers: KeyModifiers::NONE,
+    };
+    config.keybinds.navigation.insert(
+        "gabcdefghijz".chars().map(key).collect::<Vec<_>>().into(),
+        CommonAction::Right,
+    );
+    ctx.key_resolver = KeyResolver::new(&ctx.config);
+    ctx.queue.resize_with(3, Song::default);
+    let (initial, [_, before]) = render_bars(&ctx, width);
+    let mode_x = before.find("NORMAL").expect("mode label");
+    let mut typed = String::new();
+    for ch in "gabcdefghij".chars() {
+        typed.push(ch);
+        ctx.key_resolver.handle_key_event(key(ch), &ctx);
+        assert_eq!(ctx.key_resolver.buffer_to_string(), typed);
+        let (areas, [_, footer]) = render_bars(&ctx, width);
+        assert_eq!(areas, initial, "typing moved a section");
+        let expected = &typed[typed.len().saturating_sub(6)..];
+        assert_eq!(footer[mode_x..mode_x + 6].trim(), expected);
+        assert_eq!(
+            &footer[mode_x + 6..],
+            &before[mode_x + 6..],
+            "typing changed the flags or progress area"
+        );
+    }
+    ctx.key_resolver.handle_key_event(key('z'), &ctx);
+    assert_eq!(ctx.key_resolver.buffer_to_string(), "");
+    assert_eq!(render_bars(&ctx, width).1[1], before);
+    ctx.key_resolver.handle_key_event(key('g'), &ctx);
+    ctx.key_resolver.handle_timeout(&ctx);
+    assert_eq!(ctx.key_resolver.buffer_to_string(), "");
+    assert_eq!(render_bars(&ctx, width).1[1], before);
+}
+
 #[rstest]
 fn auto_size_rejects_non_property_panes_and_vertical_splits() {
     use crate::config::tabs::PaneOrSplitFile;

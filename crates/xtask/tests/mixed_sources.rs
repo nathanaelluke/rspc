@@ -8,6 +8,21 @@ use std::{
 use support::{Harness, Protocol, quote, state_is, wait};
 
 #[test]
+fn spotify_startup_recovers_from_a_stale_port_file() -> Result<()> {
+    let mut h = Harness::mixed()?;
+    h.stop()?;
+    fs::write(
+        h.path("state/rspc/soloist/fixture-startup-delay.json"),
+        "0.2",
+    )?;
+    h.start()?;
+    h.raw("playid 1")?;
+    wait(|| Ok(h.spotify()["uri"] == "spotify:track:first"))?;
+    assert!(state_is(&h.status()?, "play"));
+    Ok(())
+}
+
+#[test]
 fn selection_info_preserves_default_mpd_queue_outputs_and_state() -> Result<()> {
     let h = Harness::mixed()?;
     let queue = h.mpd("playlistinfo", "default")?;
@@ -121,6 +136,23 @@ fn deleting_paused_tracks_keeps_both_players_paused() -> Result<()> {
             .count(),
         1
     );
+    Ok(())
+}
+
+#[test]
+fn seeking_a_local_track_selects_it_and_restarts_it_after_stop() -> Result<()> {
+    let h = Harness::mixed()?;
+    for (command, position) in [("seekid 4 2", 2.0), ("seek 3 3", 3.0)] {
+        h.raw(command)?;
+        wait(|| {
+            let status = h.status()?;
+            Ok(status["songid"] == 4
+                && state_is(&status, "play")
+                && status["elapsed"].as_f64().unwrap_or_default() >= position)
+        })?;
+        assert!(h.mpd("status", "rspc")?.contains("state: play"));
+        h.raw("stop")?;
+    }
     Ok(())
 }
 

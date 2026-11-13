@@ -76,7 +76,6 @@ impl Player {
 
 pub struct Engine {
     pub catalog: Arc<Catalog>,
-    pub art_cache: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     pub player: Mutex<Player>,
     pub events: watch::Sender<HashMap<&'static str, u64>>,
     pub shutdown: watch::Sender<bool>,
@@ -105,6 +104,15 @@ impl PlayTarget {
     }
 }
 
+fn seek_position_ms(seconds: f64, start_ms: u64, duration_ms: u64) -> Result<u64> {
+    ensure!(seconds.is_finite(), "invalid seek position");
+    ensure!(
+        duration_ms > 0,
+        "this source has no known seekable duration"
+    );
+    Ok((seconds * 1000.0 + start_ms as f64).clamp(0.0, duration_ms as f64) as u64)
+}
+
 impl Engine {
     pub async fn new(
         demo: bool,
@@ -123,7 +131,6 @@ impl Engine {
         let (shutdown, _) = watch::channel(false);
         Ok(Arc::new(Self {
             catalog,
-            art_cache: Mutex::new(HashMap::new()),
             player: Mutex::new(Player {
                 queue,
                 repeat: false,
@@ -277,6 +284,10 @@ impl Engine {
     async fn play_target(&self, target: PlayTarget) -> Result<()> {
         let _control = self.control.lock().await;
         let result = self.play_inner(target).await;
+        self.report_control_result(result).await
+    }
+
+    async fn report_control_result(&self, result: Result<()>) -> Result<()> {
         if let Err(error) = &result {
             self.player.lock().await.error = format!("{error:#}");
             self.changed(vec!["player"]);
@@ -380,11 +391,7 @@ impl Engine {
     pub async fn pause(&self, paused: Option<bool>) -> Result<()> {
         let _control = self.control.lock().await;
         let result = self.pause_inner(paused).await;
-        if let Err(error) = &result {
-            self.player.lock().await.error = format!("{error:#}");
-            self.changed(vec!["player"]);
-        }
-        result
+        self.report_control_result(result).await
     }
 
     async fn pause_inner(&self, paused: Option<bool>) -> Result<()> {
@@ -468,7 +475,6 @@ impl Engine {
         self.changed(vec!["player"]);
     }
     pub async fn seek(&self, seconds: f64, relative: bool) -> Result<()> {
-        anyhow::ensure!(seconds.is_finite(), "invalid seek position");
         let _control = self.control.lock().await;
         self.seek_inner(seconds, relative).await
     }
@@ -482,23 +488,22 @@ impl Engine {
     }
 
     async fn seek_target(&self, target: PlayTarget, seconds: f64) -> Result<()> {
-        anyhow::ensure!(seconds.is_finite(), "invalid seek position");
         let _control = self.control.lock().await;
-        let id = {
+        let (id, position_ms, start_playback) = {
             let p = self.player.lock().await;
             let entry = p
                 .queue
                 .entries
                 .get(target.index(&p.queue)?)
                 .context("queue position out of range")?;
-            anyhow::ensure!(
-                entry.track.duration_ms > 0,
-                "this source has no known seekable duration"
-            );
-            (p.queue.current != Some(entry.id)).then_some(entry.id)
+            (
+                entry.id,
+                seek_position_ms(seconds, 0, entry.track.duration_ms)?,
+                p.stopped || p.queue.current != Some(entry.id),
+            )
         };
-        if let Some(id) = id {
-            self.play_inner(PlayTarget::Id(id)).await?;
+        if start_playback {
+            return self.play_inner_at(PlayTarget::Id(id), position_ms).await;
         }
         self.seek_inner(seconds, false).await
     }
@@ -506,15 +511,11 @@ impl Engine {
     async fn seek_inner(&self, seconds: f64, relative: bool) -> Result<()> {
         let state = self.playback().await;
         let duration = state.entry.as_ref().map_or(0, |e| e.track.duration_ms);
-        anyhow::ensure!(duration > 0, "this source has no known seekable duration");
-        let ms = (seconds * 1000.0
-            + if relative {
-                state.position_ms as f64
-            } else {
-                0.0
-            })
-        .max(0.0)
-        .min(duration as f64) as u64;
+        let ms = seek_position_ms(
+            seconds,
+            if relative { state.position_ms } else { 0 },
+            duration,
+        )?;
         let (backend, request) = {
             let p = self.player.lock().await;
             (p.backend, p.request)
@@ -526,12 +527,15 @@ impl Engine {
                     local.seek(ms).await?;
                 }
             }
-            _ => {
+            Some(Backend::Spotify) => {
                 let soloist = self.soloist.read().await.clone();
                 if let Some(n) = soloist {
                     n.seek(ms.min(u32::MAX as u64) as u32).await?;
                 }
             }
+            // A paused replacement has no backend until resume. Keep its seek
+            // position without sending commands to the previously used player.
+            None => {}
         }
         let mut p = self.player.lock().await;
         if p.backend == backend
@@ -575,11 +579,7 @@ impl Engine {
     pub async fn next(&self, previous: bool) -> Result<()> {
         let _control = self.control.lock().await;
         let result = self.next_inner(previous).await;
-        if let Err(error) = &result {
-            self.player.lock().await.error = format!("{error:#}");
-            self.changed(vec!["player"]);
-        }
-        result
+        self.report_control_result(result).await
     }
 
     async fn next_inner(&self, previous: bool) -> Result<()> {

@@ -1,6 +1,8 @@
-//! MPD's documented wire format is the adapter boundary, not an external MPD server.
-//! The frontend Client/ProtoClient parsers consume every response emitted here.
-use super::{engine::Engine, queue::Entry};
+//! MPD protocol server for the shared queue.
+use super::{
+    engine::Engine,
+    queue::{Entry, Queue},
+};
 use anyhow::{Context, Result, bail, ensure};
 use std::sync::Arc;
 use tokio::{
@@ -161,24 +163,6 @@ async fn read_command(read: &mut (impl AsyncBufRead + Unpin), line: &mut Vec<u8>
     Ok(bytes)
 }
 
-async fn artwork_bytes(mut response: reqwest::Response) -> Result<Vec<u8>> {
-    const MAX_ARTWORK_BYTES: usize = 16 * 1024 * 1024;
-    let length = response.content_length();
-    ensure!(
-        length.is_none_or(|length| length <= MAX_ARTWORK_BYTES as u64),
-        "album artwork is too large"
-    );
-    let mut data = Vec::with_capacity(length.unwrap_or(0) as usize);
-    while let Some(chunk) = response.chunk().await? {
-        ensure!(
-            chunk.len() <= MAX_ARTWORK_BYTES - data.len(),
-            "album artwork is too large"
-        );
-        data.extend_from_slice(&chunk);
-    }
-    Ok(data)
-}
-
 pub fn words(line: &str) -> Result<Vec<String>> {
     let mut result = Vec::new();
     let mut chars = line.trim().chars().peekable();
@@ -234,11 +218,7 @@ pub fn song(entry: &Entry, position: Option<usize>) -> String {
     for genre in &t.genres {
         s.push_str(&format!("Genre: {}\n", clean(genre)));
     }
-    for artist in if t.album_artists.is_empty() {
-        &t.artists
-    } else {
-        &t.album_artists
-    } {
+    for artist in t.album_artists() {
         s.push_str(&format!("AlbumArtist: {}\n", clean(artist)));
     }
     if let Some(position) = position {
@@ -263,6 +243,23 @@ fn range(text: &str, len: usize) -> Result<(usize, usize)> {
             .checked_add(1)
             .context("queue position is too large")?;
         Ok((start, end))
+    }
+}
+
+fn queue_index(queue: &Queue, text: &str, by_id: bool) -> Result<usize> {
+    if by_id {
+        queue.index(text.parse()?)
+    } else {
+        Ok(text.parse()?)
+    }
+}
+
+fn queue_range(queue: &Queue, text: &str, by_id: bool) -> Result<(usize, usize)> {
+    if by_id {
+        let index = queue.index(text.parse()?)?;
+        Ok((index, index + 1))
+    } else {
+        range(text, queue.entries.len())
     }
 }
 async fn list_songs(engine: &Engine, tracks: Vec<crate::model::TrackInfo>) -> Vec<u8> {
@@ -454,12 +451,7 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
         "delete" | "deleteid" => {
             engine
                 .edit_queue(|queue| {
-                    let (a, b) = if command == "deleteid" {
-                        let i = queue.index(arg(args, 1)?.parse()?)?;
-                        (i, i + 1)
-                    } else {
-                        range(arg(args, 1)?, queue.entries.len())?
-                    };
+                    let (a, b) = queue_range(queue, arg(args, 1)?, command == "deleteid")?;
                     queue.delete(a, b)
                 })
                 .await?;
@@ -468,12 +460,7 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
         "move" | "moveid" => {
             engine
                 .edit_queue(|queue| {
-                    let (a, b) = if command == "moveid" {
-                        let i = queue.index(arg(args, 1)?.parse()?)?;
-                        (i, i + 1)
-                    } else {
-                        range(arg(args, 1)?, queue.entries.len())?
-                    };
+                    let (a, b) = queue_range(queue, arg(args, 1)?, command == "moveid")?;
                     let dest = queue.position(arg(args, 2)?)?;
                     queue.move_range(a, b, dest)
                 })
@@ -500,16 +487,8 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
         "swap" | "swapid" => {
             engine
                 .edit_queue(|queue| {
-                    let a = if command == "swapid" {
-                        queue.index(arg(args, 1)?.parse()?)?
-                    } else {
-                        arg(args, 1)?.parse()?
-                    };
-                    let b = if command == "swapid" {
-                        queue.index(arg(args, 2)?.parse()?)?
-                    } else {
-                        arg(args, 2)?.parse()?
-                    };
+                    let a = queue_index(queue, arg(args, 1)?, command == "swapid")?;
+                    let b = queue_index(queue, arg(args, 2)?, command == "swapid")?;
                     ensure!(
                         a < queue.entries.len() && b < queue.entries.len(),
                         "queue index out of range"
@@ -573,28 +552,21 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
             String::new()
         }
         "repeat" | "random" | "single" | "consume" => {
-            let value = arg(args, 1)?;
-            ensure!(
-                ["0", "1", "oneshot"].contains(&value),
-                "invalid playback mode"
-            );
+            let mode = match arg(args, 1)? {
+                "0" => 0,
+                "1" => 1,
+                "oneshot" if matches!(command, "single" | "consume") => 2,
+                _ => bail!("invalid playback mode"),
+            };
             {
                 let mut p = engine.player.lock().await;
                 match command {
-                    "repeat" => p.repeat = value != "0",
-                    "random" => p.random = value != "0",
-                    "single" => {
-                        p.single = if value == "oneshot" {
-                            2
-                        } else if value == "0" {
-                            0
-                        } else {
-                            1
-                        }
-                    }
+                    "repeat" => p.repeat = mode != 0,
+                    "random" => p.random = mode != 0,
+                    "single" => p.single = mode,
                     "consume" => {
-                        p.queue.consume = value != "0";
-                        p.queue.consume_oneshot = value == "oneshot";
+                        p.queue.consume = mode != 0;
+                        p.queue.consume_oneshot = mode == 2;
                     }
                     _ => unreachable!(),
                 }
@@ -835,26 +807,7 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
             let tracks = engine.catalog.resolve(arg(args, 1)?).await?;
             let track = tracks.first().context("track not found")?;
             let uri = track.image_url.as_deref().ok_or(MissingArtwork)?;
-            let url = url::Url::parse(uri)?;
-            ensure!(url.scheme() == "https", "artwork must use HTTPS");
-            let cached = engine.art_cache.lock().await.get(uri).cloned();
-            let data = match cached {
-                Some(data) => data,
-                None => {
-                    let response = crate::spotify::http()
-                        .get(url)
-                        .send()
-                        .await?
-                        .error_for_status()?;
-                    let data = Arc::new(artwork_bytes(response).await?);
-                    let mut cache = engine.art_cache.lock().await;
-                    if cache.len() >= 8 {
-                        cache.clear();
-                    }
-                    cache.insert(uri.to_owned(), Arc::clone(&data));
-                    data
-                }
-            };
+            let data = engine.catalog.artwork(uri).await?;
             let offset: usize = arg(args, 2)?.parse()?;
             ensure!(offset <= data.len(), "artwork offset out of range");
             let end = (offset + 65536).min(data.len());

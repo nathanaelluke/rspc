@@ -42,6 +42,15 @@ pub struct TrackInfo {
     pub is_local: bool,
     pub is_playable: bool,
 }
+impl TrackInfo {
+    pub fn album_artists(&self) -> &[String] {
+        if self.album_artists.is_empty() {
+            &self.artists
+        } else {
+            &self.album_artists
+        }
+    }
+}
 impl Default for TrackInfo {
     fn default() -> Self {
         Self {
