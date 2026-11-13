@@ -642,7 +642,7 @@ impl Player {
         p.wire.command(&format!("enableoutput {id}")).await?;
         Ok(())
     }
-    pub async fn load(&self, uri: &str, request: u64, volume: u8) -> Result<()> {
+    pub async fn load(&self, uri: &str, request: u64, volume: u8, position_ms: u64) -> Result<()> {
         let file = uri.strip_prefix("mpd:").context("expected an MPD URI")?;
         let mut p = self.state.lock().await;
         self.generation.store(request, Ordering::Relaxed);
@@ -659,7 +659,13 @@ impl Player {
             "consume 0".into(),
             format!("addid {}", quote(file)?),
             format!("setvol {volume}"),
-            "play 0".into(),
+            // Start at the requested offset in one command. Starting at zero
+            // then seeking can race decoder startup for short files on MPD.
+            if position_ms == 0 {
+                "play 0".into()
+            } else {
+                format!("seek 0 {:.3}", position_ms as f64 / 1000.0)
+            },
         ] {
             p.wire.command(&command).await?;
         }

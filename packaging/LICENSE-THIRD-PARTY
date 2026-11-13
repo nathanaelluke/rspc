@@ -1,7 +1,7 @@
 rspc third-party licenses
 Generated with cargo-about 0.9.0
-Inputs SHA256: e2cb821570e72fcddff0acd2560324f2d86600f1855eca1c277eae4ef3a9ed97
-Text SHA256: 758ecedaf01ab33e65ceb92730c1dc989fcb77e6b07dc66e65dae48adb195d81
+Inputs SHA256: 5647d93af37d0e27f093cf11453ebcb07d5892249421c1edfd0aed24c6e7d20d
+Text SHA256: 78b635e5672cad38e72becf58738d0613ba12a20f7fdae358dbe9e571124af04
 
 These notices cover Rust dependencies for all three supported release targets,
 including build tools. rspc's own licenses are distributed separately.
@@ -1462,7 +1462,7 @@ Original upstream notices
   linux-raw-sys 0.12.1 (authors: Dan Gohman <dev@sunfishcode.online>)
   linux-raw-sys 0.4.15 (authors: Dan Gohman <dev@sunfishcode.online>)
   rustix 0.38.44 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
-  rustix 1.1.4 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
+  rustix 1.1.6 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
 
 
                                  Apache License
@@ -6784,7 +6784,7 @@ Apache-2.0 / Original upstream notices
   rsa 0.9.10 (authors: RustCrypto Developers, dignifiedquire <dignifiedquire@gmail.com>)
   rustc_version 0.4.1
   rustix 0.38.44 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
-  rustix 1.1.4 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
+  rustix 1.1.6 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
   rustls 0.23.46
   scopeguard 1.2.0 (authors: bluss)
   security-framework 3.5.1 (authors: Steven Fackler <sfackler@gmail.com>, Kornel <kornel@geekhood.net>)
@@ -15424,7 +15424,7 @@ MIT / Original upstream notices
   quote 1.0.45 (authors: David Tolnay <dtolnay@gmail.com>)
   rsa 0.9.10 (authors: RustCrypto Developers, dignifiedquire <dignifiedquire@gmail.com>)
   rustix 0.38.44 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
-  rustix 1.1.4 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
+  rustix 1.1.6 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
   rustversion 1.0.22 (authors: David Tolnay <dtolnay@gmail.com>)
   semver 1.0.27 (authors: David Tolnay <dtolnay@gmail.com>)
   serde 1.0.229 (authors: Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>)
@@ -15772,7 +15772,7 @@ at your option.
 ==============================================================================
 Original upstream notices
   rustix 0.38.44 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
-  rustix 1.1.4 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
+  rustix 1.1.6 (authors: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>)
 
 Short version for non-lawyers:
 

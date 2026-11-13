@@ -109,7 +109,9 @@ fn deleting_paused_tracks_keeps_both_players_paused() -> Result<()> {
     h.raw("pause 0")?;
     wait(|| {
         let state = h.status()?;
-        Ok(state["songid"] == 2 && state_is(&state, "play"))
+        Ok(state["songid"] == 2
+            && state_is(&state, "play")
+            && state["elapsed"].as_f64().unwrap_or(0.0) >= 0.1)
     })?;
     assert!(h.status()?["elapsed"].as_f64().unwrap() >= 0.1);
     assert!(h.mpd("status", "rspc")?.contains("volume: 23"));
