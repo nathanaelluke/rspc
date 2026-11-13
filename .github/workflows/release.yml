@@ -118,7 +118,8 @@ jobs:
           unpacked=$(mktemp -d)
           tar -xzf "dist/rspc-$version-source.tar.gz" -C "$unpacked"
           cd "$unpacked/rspc-$version"
-          export CARGO_HOME=$(mktemp -d)
+          source_cargo_home=$(mktemp -d)
+          export CARGO_HOME="$source_cargo_home"
           cargo metadata --locked --offline --format-version 1 > "$RUNNER_TEMP/source-metadata.json"
           cargo build --locked --offline --release -j2 -p rspc -p rspc-ui
           ./target/release/rspc --version
