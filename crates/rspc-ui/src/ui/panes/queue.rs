@@ -45,9 +45,9 @@ use crate::{
             info_list_modal::InfoListModal,
             input_modal::InputModal,
             menu::{
-                add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
-                create_rating_modal, create_save_modal, delete_from_playlist_or_show_confirmation,
-                modal::MenuModal,
+                add_song_save_actions, add_to_playlist_or_show_modal, create_add_modal,
+                create_delete_modal, create_rating_modal, create_save_modal,
+                delete_from_playlist_or_show_confirmation, modal::MenuModal,
             },
             select_modal::SelectModal,
         },
@@ -173,6 +173,11 @@ impl QueuePane {
                 Some(section)
             })
             .list_section(ctx, |mut section| {
+                let selected = self
+                    .items(false)
+                    .map(|(_, song)| song.file.clone())
+                    .collect::<Vec<_>>();
+                add_song_save_actions(&mut section, ctx, move |_: &mut Client<'_>| Ok(selected));
                 let items = self
                     .queue
                     .items
@@ -1097,6 +1102,9 @@ impl Pane for QueuePane {
                 CommonAction::PaneLeft => {}
                 CommonAction::ContextMenu => {
                     self.open_context_menu(ctx);
+                }
+                CommonAction::Sort { .. } | CommonAction::ReverseSort => {
+                    status_warn!("Open a playlist or album to sort its songs");
                 }
                 CommonAction::Rate {
                     kind: RateKind::Value(value),

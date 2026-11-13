@@ -5,6 +5,15 @@ fn an_oversized_position_returns_an_error_instead_of_wrapping() {
     assert!(range(&usize::MAX.to_string(), 3).is_err());
 }
 
+#[test]
+fn addition_dates_are_sent_as_standard_mpd_metadata() {
+    let mut track = super::super::catalog::demo_tracks().remove(0);
+    track.added_at = Some("2026-11-01T10:00:00Z".parse().unwrap());
+    let reply = song(&Entry { id: 1, track }, Some(0));
+    assert!(reply.contains("Added: 2026-11-01T10:00:00+00:00\n"));
+    assert!(reply.contains("Date: 2026-01-01\n"));
+}
+
 #[tokio::test]
 async fn oversized_commands_are_rejected_without_waiting_for_a_newline() {
     for idle in [false, true] {
@@ -61,6 +70,42 @@ async fn fixture() -> (tempfile::TempDir, Arc<Engine>) {
     .await
     .unwrap();
     (dir, engine)
+}
+
+#[tokio::test]
+async fn liking_a_song_updates_the_library_without_disturbing_playback() {
+    let (_dir, engine) = fixture().await;
+    execute(&engine, &words("playid 1").unwrap()).await.unwrap();
+    let mut track = super::super::catalog::demo_tracks().remove(0);
+    track.uri = Some("spotify:track:unliked-demo".into());
+    track.name = "An unliked demo song".into();
+    engine.catalog.remember(vec![track]).await;
+    assert!(COMMANDS.contains(&"rspc_library_add"));
+    assert_eq!(
+        execute(
+            &engine,
+            &words("rspc_library_add spotify:track:unliked-demo").unwrap()
+        )
+        .await
+        .unwrap(),
+        b"library_added: 1\n",
+    );
+    let liked = execute(&engine, &words("listallinfo \"Liked Songs\"").unwrap())
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8(liked)
+            .unwrap()
+            .contains("An unliked demo song")
+    );
+    let state = engine.playback().await;
+    assert!(state.playing);
+    assert_eq!(state.entry.unwrap().id, 1);
+    assert!(
+        execute(&engine, &words("rspc_library_add mpd:file.flac").unwrap())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

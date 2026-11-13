@@ -1,4 +1,4 @@
-// Collection paging schema from librespot 0.8.0 (MIT). See NOTICE.
+// Collection schema from librespot 0.8.0 (MIT). See NOTICE.
 
 syntax = "proto3";
 
@@ -25,4 +25,11 @@ message PageResponse {
     repeated CollectionItem items = 1;
     string next_page_token = 2;
     string sync_token = 3;
+}
+
+message WriteRequest {
+    string username = 1;
+    string set = 2;
+    repeated CollectionItem items = 3;
+    string client_update_id = 4;
 }

@@ -200,6 +200,7 @@ impl TagBrowserPane {
 
 impl Pane for TagBrowserPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
+        self.restore_sort(ctx);
         self.browser
             .render(area, frame.buffer_mut(), &mut self.stack, ctx);
 
@@ -385,11 +386,38 @@ impl Pane for TagBrowserPane {
             }
             _ => {}
         }
+        self.restore_sort(ctx);
         Ok(())
     }
 }
 
 impl BrowserPane<DirOrSong> for TagBrowserPane {
+    fn sort_context(&self) -> Option<String> {
+        if self.stack.path().as_slice().len() != 2 {
+            return None;
+        }
+        let song = self
+            .stack
+            .current()
+            .items
+            .iter()
+            .find_map(DirStackItem::as_song)?;
+        Some(format!("album:{}", song.metadata.get("album")?.last()))
+    }
+
+    fn preview_sort_context(&self) -> Option<String> {
+        if self.stack.path().as_slice().len() != 1 {
+            return None;
+        }
+        let song = self
+            .stack
+            .next()?
+            .items
+            .iter()
+            .find_map(DirStackItem::as_song)?;
+        Some(format!("album:{}", song.metadata.get("album")?.last()))
+    }
+
     fn stack(&self) -> &DirStack<DirOrSong, ListState> {
         &self.stack
     }

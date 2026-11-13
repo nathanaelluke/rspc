@@ -52,6 +52,8 @@ pub enum GlobalAction {
     PreviousTab,
     #[strum(to_string = "SwitchToTab({0})")]
     SwitchToTab(TabName),
+    #[strum(to_string = "SwitchToTabIndex({0})")]
+    SwitchToTabIndex(usize),
     Command {
         command: String,
         description: Option<String>,
@@ -98,6 +100,7 @@ pub enum GlobalActionFile {
     NextTab,
     PreviousTab,
     SwitchToTab(String),
+    SwitchToTabIndex(std::num::NonZeroUsize),
     QueueTab,
     DirectoriesTab,
     ArtistsTab,
@@ -153,6 +156,9 @@ impl From<GlobalActionFile> for GlobalAction {
             GlobalActionFile::NextTab => GlobalAction::NextTab,
             GlobalActionFile::ToggleConsume => GlobalAction::ToggleConsume,
             GlobalActionFile::SwitchToTab(name) => GlobalAction::SwitchToTab(name.into()),
+            GlobalActionFile::SwitchToTabIndex(position) => {
+                GlobalAction::SwitchToTabIndex(position.get() - 1)
+            }
             GlobalActionFile::QueueTab => GlobalAction::SwitchToTab("Queue".into()),
             GlobalActionFile::DirectoriesTab => GlobalAction::SwitchToTab("Directories".into()),
             GlobalActionFile::ArtistsTab => GlobalAction::SwitchToTab("Artists".into()),
@@ -213,6 +219,7 @@ impl ToDescription for GlobalAction {
             GlobalAction::NextTab => "Switch to next tab".into(),
             GlobalAction::PreviousTab => "Switch to previous tab".into(),
             GlobalAction::SwitchToTab(name) => Cow::Owned(format!("Switch directly to {name} tab")),
+            GlobalAction::SwitchToTabIndex(index) => format!("Switch to tab at position {}", index + 1).into(),
             GlobalAction::ShowHelp => "Show keybinds".into(),
             GlobalAction::CommandMode => "Enter command mode".into(),
             GlobalAction::Command { description: None, .. } => "Execute a command".into(),
@@ -799,6 +806,10 @@ impl Default for DeleteKind {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq)]
 pub enum CommonActionFile {
+    Sort {
+        by: crate::config::sort_mode::SongSortKey,
+    },
+    ReverseSort,
     Down,
     Up,
     Right,
@@ -860,6 +871,10 @@ pub enum CommonActionFile {
 #[derive(Debug, Display, Clone, EnumDiscriminants, PartialEq)]
 #[strum_discriminants(derive(VariantArray))]
 pub enum CommonAction {
+    Sort {
+        by: crate::config::sort_mode::SongSortKey,
+    },
+    ReverseSort,
     Down,
     Up,
     Right,
@@ -909,6 +924,8 @@ pub enum CommonAction {
 impl ToDescription for CommonAction {
     fn to_description(&self) -> Cow<'static, str> {
         match self {
+            CommonAction::Sort { by } => format!("Sort playlist by {by}").into(),
+            CommonAction::ReverseSort => "Reverse this playlist's view order".into(),
             CommonAction::Up => "Go up".into(),
             CommonAction::Down => "Go down".into(),
             CommonAction::UpHalf => "Jump by half a screen up".into(),
@@ -1087,6 +1104,8 @@ impl TryFrom<CommonActionFile> for CommonAction {
 
     fn try_from(value: CommonActionFile) -> Result<Self, Self::Error> {
         Ok(match value {
+            CommonActionFile::Sort { by } => CommonAction::Sort { by },
+            CommonActionFile::ReverseSort => CommonAction::ReverseSort,
             CommonActionFile::Up => CommonAction::Up,
             CommonActionFile::Down => CommonAction::Down,
             CommonActionFile::UpHalf => CommonAction::UpHalf,

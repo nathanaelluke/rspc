@@ -335,6 +335,82 @@ mod test {
     }
 
     #[rstest]
+    fn default_number_keys_select_tab_positions(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(
+            app_event_channel.clone(),
+            work_request_channel,
+            client_request_channel,
+        );
+        let resolver = KeyResolver::new(&ctx.config);
+        for (index, digit) in "1234567890".chars().enumerate() {
+            resolver.handle_key_event(k(digit), &ctx);
+            match app_event_channel.1.recv_timeout(Duration::from_millis(100)) {
+                Ok(AppEvent::ActionResolved(ActionEvent { actions, .. })) => {
+                    assert!(
+                        matches!(actions.as_slice(), [Actions::Global(crate::config::keys::GlobalAction::SwitchToTabIndex(position))] if *position == index)
+                    );
+                }
+                other => panic!("expected tab position for {digit}, got {other:?}"),
+            }
+        }
+        assert!(
+            ron::from_str::<crate::config::keys::GlobalActionFile>("SwitchToTabIndex(0)").is_err()
+        );
+        assert!(
+            matches!(crate::config::keys::GlobalAction::try_from(crate::config::keys::GlobalActionFile::SwitchToTab("Custom".into())), Ok(crate::config::keys::GlobalAction::SwitchToTab(name)) if name == crate::config::tabs::TabName::from("Custom"))
+        );
+    }
+
+    #[rstest]
+    fn default_sort_prefix_does_not_stop_playback_and_shift_s_stops(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(
+            app_event_channel.clone(),
+            work_request_channel,
+            client_request_channel,
+        );
+        let resolver = KeyResolver::new(&ctx.config);
+        resolver.handle_key_event(k('s'), &ctx);
+        assert_eq!(resolver.buffer_to_string(), "s");
+        assert!(app_event_channel.1.try_recv().is_err());
+        resolver.handle_key_event(k('r'), &ctx);
+        match app_event_channel.1.recv_timeout(Duration::from_millis(100)) {
+            Ok(AppEvent::ActionResolved(ActionEvent { actions, .. })) => {
+                assert!(matches!(
+                    actions.as_slice(),
+                    [Actions::Common(CommonAction::Sort {
+                        by: crate::config::sort_mode::SongSortKey::Recent
+                    })]
+                ));
+            }
+            other => panic!("expected sort action, got {other:?}"),
+        }
+        resolver.handle_key_event(k('s'), &ctx);
+        resolver.handle_timeout(&ctx);
+        assert!(app_event_channel.1.try_recv().is_err());
+        resolver.handle_key_event(
+            crossterm::event::KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE).into(),
+            &ctx,
+        );
+        match app_event_channel.1.recv_timeout(Duration::from_millis(100)) {
+            Ok(AppEvent::ActionResolved(ActionEvent { actions, .. })) => {
+                assert!(matches!(
+                    actions.as_slice(),
+                    [Actions::Global(crate::config::keys::GlobalAction::Stop)]
+                ));
+            }
+            other => panic!("expected Stop on S, got {other:?}"),
+        }
+    }
+
+    #[rstest]
     fn handle_key_event_exact_clears_and_executes(
         app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
         work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),

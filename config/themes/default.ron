@@ -49,7 +49,7 @@
         padding: 1,
         min_width: 0,
         alignment: Center,
-        active_style: (fg: "#f0f0f0", bg: "#292929", modifiers: "Bold"),
+        active_style: (fg: "#ffffff", bg: "#3a3a3a", modifiers: "Bold"),
         inactive_style: (fg: "#858585", bg: "#101010"),
     ),
     lyrics: (

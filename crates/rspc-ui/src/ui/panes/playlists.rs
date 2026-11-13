@@ -61,6 +61,7 @@ impl PlaylistsPane {
 
 impl Pane for PlaylistsPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
+        self.restore_sort(ctx);
         self.browser
             .render(area, frame.buffer_mut(), &mut self.stack, ctx);
 
@@ -177,7 +178,6 @@ impl Pane for PlaylistsPane {
                 let mut new_stack = DirStack::new(data);
                 let old_viewport_len = self.stack.current().state.viewport_len();
                 let old_content_len = self.stack.current().state.content_len();
-                let old_marked = self.stack.current().marked().clone();
                 match self.stack.path().as_slice() {
                     [playlist_name] => {
                         let Some((selected_idx, selected_playlist)) =
@@ -210,8 +210,6 @@ impl Pane for PlaylistsPane {
 
                         log::debug!(stack:? = new_stack; "Reinitializing playlist stack");
 
-                        let selected_song = self.stack().current().selected_with_idx();
-
                         // Get the actually selected playlist after the resolution. If none is
                         // selected then it means that we have no more playlists to go into so we
                         // end here
@@ -220,6 +218,10 @@ impl Pane for PlaylistsPane {
                         };
 
                         let playlist = new_playlist.as_path().to_owned();
+                        let sort = ctx
+                            .collection_sorts
+                            .borrow()
+                            .get(&format!("playlist:{playlist}"));
                         new_stack
                             .current_mut()
                             .state
@@ -243,24 +245,12 @@ impl Pane for PlaylistsPane {
                         new_stack
                             .insert(next_path, songs.into_iter().map(DirOrSong::Song).collect());
                         new_stack.enter();
-
-                        if let Some((idx, song)) = selected_song {
-                            let idx_to_select = new_stack
-                                .current()
-                                .items
-                                .iter()
-                                .find_position(|item| item.as_path() == song.as_path())
-                                .map_or(idx, |(idx, _)| idx);
-                            new_stack
-                                .current_mut()
-                                .state
-                                .set_viewport_len(old_viewport_len);
-                            new_stack
-                                .current_mut()
-                                .state
-                                .select(Some(idx_to_select), ctx.config.scrolloff);
-                        }
-                        *new_stack.current_mut().marked_mut() = old_marked;
+                        new_stack
+                            .current_mut()
+                            .sort_songs(sort, ctx.config.scrolloff);
+                        new_stack
+                            .current_mut()
+                            .restore_selection(self.stack.current(), ctx.config.scrolloff);
 
                         self.stack = new_stack;
                         ctx.render()?;
@@ -302,11 +292,28 @@ impl Pane for PlaylistsPane {
             }
             _ => {}
         }
+        self.restore_sort(ctx);
         Ok(())
     }
 }
 
 impl BrowserPane<DirOrSong> for PlaylistsPane {
+    fn preview_sort_context(&self) -> Option<String> {
+        if self.stack.path().is_empty() {
+            self.stack
+                .current()
+                .selected()
+                .map(|item| format!("playlist:{}", item.as_path()))
+        } else {
+            None
+        }
+    }
+    fn sort_context(&self) -> Option<String> {
+        match self.stack.path().as_slice() {
+            [playlist] => Some(format!("playlist:{playlist}")),
+            _ => None,
+        }
+    }
     fn stack(&self) -> &DirStack<DirOrSong, ListState> {
         &self.stack
     }
@@ -375,7 +382,7 @@ impl BrowserPane<DirOrSong> for PlaylistsPane {
                         DirOrSong::Dir { .. } => None,
                         DirOrSong::Song(_) => Some(MpdDelete::SongInPlaylist {
                             playlist: Arc::clone(&playlist),
-                            range: SingleOrRange::single(idx),
+                            range: SingleOrRange::single(self.stack.current().source_index(idx)),
                         }),
                     })
                     .collect_vec()
@@ -430,6 +437,10 @@ impl BrowserPane<DirOrSong> for PlaylistsPane {
     }
 
     fn move_selected(&mut self, direction: MoveDirection, ctx: &Ctx) -> Result<()> {
+        if self.stack.current().has_sort() {
+            status_warn!("Restore the playlist's original order before moving songs");
+            return Ok(());
+        }
         let Some(DirOrSong::Dir { name: playlist, .. }) =
             self.stack.previous().and_then(|p| p.selected())
         else {

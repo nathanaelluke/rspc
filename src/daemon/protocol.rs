@@ -50,6 +50,7 @@ const COMMANDS: &[&str] = &[
     "rspc_identity",
     "rspc_artist_albums",
     "rspc_selection_info",
+    "rspc_library_add",
     "rspc_diagnostics",
     "rspc_pair",
     "rspc_login",
@@ -215,6 +216,9 @@ pub fn song(entry: &Entry, position: Option<usize>) -> String {
     for artist in &t.artists {
         s.push_str(&format!("Artist: {}\n", clean(artist)));
     }
+    if let Some(added_at) = t.added_at {
+        s.push_str(&format!("Added: {}\n", added_at.to_rfc3339()));
+    }
     for genre in &t.genres {
         s.push_str(&format!("Genre: {}\n", clean(genre)));
     }
@@ -275,6 +279,10 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
     let command = arg(args, 0)?;
     let text = match command {
         "ping" | "password" | "binarylimit" | "noidle" => String::new(),
+        "rspc_library_add" => {
+            let added = engine.catalog.add_liked(&args[1..]).await?;
+            format!("library_added: {added}\n")
+        }
         "rspc_selection_info" => {
             let info = engine
                 .catalog

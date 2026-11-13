@@ -1,7 +1,7 @@
 //! Spotify catalog transport. Reads, edits and search share one authenticated
 //! session, HTTP pool, response limit and rate-limit deadline.
 use super::auth::{Authentication, RequestAuth, SoloistAuth};
-use super::protocol::collection::{PageRequest, PageResponse};
+use super::protocol::collection::{PageRequest, PageResponse, WriteRequest};
 use librespot_core::{Error, SpotifyId, error::ErrorKind, session::Session};
 use librespot_protocol::playlist4_external::{ListChanges, SelectedListContent};
 use protobuf::Message;
@@ -157,6 +157,16 @@ impl Client {
             )
             .await?;
         Ok(PageResponse::parse_from_bytes(&bytes)?)
+    }
+
+    pub async fn collection_write(&self, request: &WriteRequest) -> Result<(), Error> {
+        self.post(
+            "/collection/v2/write",
+            COLLECTION_TYPE,
+            request.write_to_bytes()?,
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn playlist_changes(

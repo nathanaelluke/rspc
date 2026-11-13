@@ -14,6 +14,99 @@ struct Request {
     path: String,
     body: Vec<u8>,
 }
+
+#[tokio::test]
+async fn liking_tracks_preserves_existing_addition_dates_and_refreshes_membership() {
+    use crate::spotify::protocol::collection::{CollectionItem, PageResponse, WriteRequest};
+    let old = uri("track", 1);
+    let new = uri("track", 2);
+    let old_entry = CollectionItem {
+        uri: old.clone(),
+        added_at: 1,
+        ..Default::default()
+    };
+    let before = PageResponse {
+        items: vec![old_entry.clone()],
+        ..Default::default()
+    };
+    let after = PageResponse {
+        items: vec![
+            old_entry,
+            CollectionItem {
+                uri: new.clone(),
+                added_at: 2,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let (client, task) = server(vec![
+        (200, before.write_to_bytes().unwrap()),
+        (200, Vec::new()),
+        (200, after.write_to_bytes().unwrap()),
+    ])
+    .await;
+    assert_eq!(
+        collection::add_tracks(&client, &[old, new.clone(), new.clone()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        collection::add_tracks(&client, std::slice::from_ref(&new))
+            .await
+            .unwrap(),
+        0
+    );
+    let requests = task.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].path.starts_with("POST /collection/v2/write "));
+    let write = WriteRequest::parse_from_bytes(&requests[1].body).unwrap();
+    assert_eq!(write.username, "fixture-user");
+    assert_eq!(write.set, "collection");
+    assert!(uuid::Uuid::parse_str(&write.client_update_id).is_ok());
+    assert_eq!(write.items.len(), 1);
+    assert_eq!(write.items[0].uri, new);
+    assert!(!write.items[0].is_removed);
+    assert!(write.items[0].added_at > 2);
+}
+
+#[tokio::test]
+async fn liking_rejects_local_files_and_bad_ids_before_requesting_the_library() {
+    let client = Client::fixture("http://127.0.0.1:1".into());
+    for (uris, expected) in [
+        (
+            vec!["mpd:file.flac".into()],
+            "Liked Songs accepts Spotify tracks only",
+        ),
+        (
+            vec!["spotify:track:invalid".into()],
+            "Invalid Spotify track ID",
+        ),
+        (Vec::new(), "No songs selected"),
+    ] {
+        let error = collection::add_tracks(&client, &uris).await.unwrap_err();
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_like_is_not_retried_and_does_not_change_cached_membership() {
+    use crate::spotify::protocol::collection::PageResponse;
+    let (client, task) = server(vec![
+        (200, PageResponse::default().write_to_bytes().unwrap()),
+        (503, b"temporarily unavailable".to_vec()),
+        (200, Vec::new()),
+    ])
+    .await;
+    let uris = vec![uri("track", 1)];
+    assert!(collection::add_tracks(&client, &uris).await.is_err());
+    assert_eq!(collection::add_tracks(&client, &uris).await.unwrap(), 1);
+    let requests = task.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].path.starts_with("POST /collection/v2/write "));
+    assert!(requests[2].path.starts_with("POST /collection/v2/write "));
+}
 fn playlist_page(
     total: i32,
     revision: u8,

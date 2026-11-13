@@ -317,6 +317,7 @@ fn track_from_entity(entity: &Value) -> Option<TrackInfo> {
             .as_array()
             .is_some_and(|ratings| ratings.iter().any(|r| r == "explicit")),
         release_date: None,
+        added_at: None,
     })
 }
 struct Request {

@@ -28,11 +28,10 @@ use crate::{
             info_list_modal::{InfoListModal, KeyValues},
             input_modal::InputModal,
             menu::{
-                add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
-                create_rating_modal, create_save_modal, delete_from_playlist_or_show_confirmation,
-                modal::MenuModal,
+                add_song_save_actions, add_to_playlist_or_show_modal, create_add_modal,
+                create_delete_modal, create_rating_modal, create_save_modal,
+                delete_from_playlist_or_show_confirmation, modal::MenuModal, song_sort_modal,
             },
-            select_modal::SelectModal,
         },
         panes::Pane,
         widgets::browser::BrowserArea,
@@ -52,6 +51,70 @@ where
 {
     fn stack(&self) -> &DirStack<T, ListState>;
     fn stack_mut(&mut self) -> &mut DirStack<T, ListState>;
+    fn sort_context(&self) -> Option<String> {
+        None
+    }
+    fn preview_sort_context(&self) -> Option<String> {
+        None
+    }
+
+    fn restore_sort(&mut self, ctx: &Ctx) {
+        if let Some(context) = self.sort_context() {
+            let sort = ctx.collection_sorts.borrow().get(&context);
+            self.stack_mut()
+                .current_mut()
+                .sort_songs(sort, ctx.config.scrolloff);
+        }
+        if let Some(context) = self.preview_sort_context() {
+            let sort = ctx.collection_sorts.borrow().get(&context);
+            if let Some(preview) = self.stack_mut().next_mut() {
+                preview.sort_songs(sort, ctx.config.scrolloff);
+            }
+        }
+    }
+
+    fn change_sort(
+        &mut self,
+        by: Option<crate::config::sort_mode::SongSortKey>,
+        ctx: &Ctx,
+    ) -> Result<()> {
+        let Some(context) = self.sort_context() else {
+            status_warn!("Open a playlist or album to sort its songs");
+            return Ok(());
+        };
+        if by == Some(crate::config::sort_mode::SongSortKey::Recent)
+            && self.stack().current().loaded
+            && !self.stack().current().items.is_empty()
+            && self
+                .stack()
+                .current()
+                .items
+                .iter()
+                .all(|item| item.as_song().is_none_or(|song| song.added.is_none()))
+        {
+            status_warn!("Addition dates are unavailable for these songs");
+            return Ok(());
+        }
+        let mut sorts = ctx.collection_sorts.borrow_mut();
+        let sort = by.map_or_else(
+            || {
+                let mut sort = sorts.get(&context);
+                sort.reverse = !sort.reverse;
+                sort
+            },
+            crate::config::sort_mode::SongSort::new,
+        );
+        sorts.set(&context, sort)?;
+        drop(sorts);
+        self.restore_sort(ctx);
+        if let Some(by) = by {
+            status_info!("Songs sorted by {by}");
+        } else {
+            status_info!("Song sort direction reversed");
+        }
+        ctx.render()?;
+        Ok(())
+    }
     fn browser_areas(&self) -> EnumMap<BrowserArea, Rect>;
     fn scrollbar_area(&self) -> Option<Rect> {
         let areas = self.browser_areas();
@@ -340,6 +403,7 @@ where
     }
 
     fn handle_mouse_action(&mut self, event: MouseEvent, ctx: &Ctx) -> Result<()> {
+        self.restore_sort(ctx);
         if self.handle_scrollbar_interaction(event, ctx)? {
             return Ok(());
         }
@@ -477,12 +541,15 @@ where
     }
 
     fn handle_common_action(&mut self, event: &mut ActionEvent, ctx: &Ctx) -> Result<()> {
+        self.restore_sort(ctx);
         let Some(action) = event.claim_common() else {
             return Ok(());
         };
         let config = &ctx.config;
 
         match action.to_owned() {
+            CommonAction::Sort { by } => self.change_sort(Some(by), ctx)?,
+            CommonAction::ReverseSort => self.change_sort(None, ctx)?,
             CommonAction::Up => {
                 self.stack_mut()
                     .current_mut()
@@ -889,6 +956,7 @@ where
     }
 
     fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
+        let context = self.sort_context();
         let list_songs_in_items = self
             .items(false)
             .map(|(_, item)| self.list_songs_in_item(item.to_owned()))
@@ -949,39 +1017,15 @@ where
                     Ok(())
                 });
 
-                section.add_item("Add to playlist", move |ctx| {
-                    let (items, playlists) = ctx.query_sync(move |client| {
-                        let items: Vec<_> = list_songs_in_items
-                            .into_iter()
-                            .map(|cb| -> Result<_> { cb(client) })
-                            .collect::<Result<Vec<Vec<_>>>>()?
-                            .into_iter()
-                            .flatten()
-                            .collect();
-                        let playlists = client.list_playlists()?;
-                        Ok((items, playlists.into_iter().map(|p| p.name).collect_vec()))
-                    })?;
-
-                    modal!(
-                        ctx,
-                        SelectModal::builder()
-                            .ctx(ctx)
-                            .options(playlists)
-                            .confirm_label("Add")
-                            .title("Select a playlist")
-                            .on_confirm(move |ctx, selected, _idx| {
-                                ctx.command(move |client| {
-                                    client.add_to_playlist_multiple(
-                                        &selected,
-                                        items.into_iter().map(|s| s.file).collect_vec(),
-                                    )?;
-                                    Ok(())
-                                });
-                                Ok(())
-                            })
-                            .build()
-                    );
-                    Ok(())
+                add_song_save_actions(&mut section, ctx, move |client: &mut Client<'_>| {
+                    let items: Vec<_> = list_songs_in_items
+                        .into_iter()
+                        .map(|cb| -> Result<_> { cb(client) })
+                        .collect::<Result<Vec<Vec<_>>>>()?
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    Ok(items.into_iter().map(|song| song.file).collect())
                 });
 
                 Some(section)
@@ -1044,6 +1088,23 @@ where
                 } else {
                     Some(section)
                 }
+            })
+            .list_section(ctx, move |mut section| {
+                let context = context?;
+                let to_sort = context.clone();
+                section.add_item("Sort songs", move |ctx| {
+                    modal!(ctx, song_sort_modal(to_sort, ctx));
+                    Ok(())
+                });
+                section.add_item("Reverse sort", move |ctx| {
+                    let mut sorts = ctx.collection_sorts.borrow_mut();
+                    let mut sort = sorts.get(&context);
+                    sort.reverse = !sort.reverse;
+                    sorts.set(&context, sort)?;
+                    ctx.render()?;
+                    Ok(())
+                });
+                Some(section)
             })
             .list_section(ctx, |section| {
                 let section = section.item("Cancel", |_ctx| Ok(()));

@@ -75,6 +75,7 @@ pub enum PaneTypeFile {
     #[cfg(debug_assertions)]
     Logs,
     Directories,
+    LikedSongs,
     Artists,
     Albums,
     AlbumArtists,
@@ -119,6 +120,7 @@ pub enum PaneType {
     #[cfg(debug_assertions)]
     Logs,
     Directories,
+    LikedSongs,
     Artists,
     AlbumArtists,
     Albums,
@@ -206,6 +208,7 @@ impl TryFrom<PaneTypeFile> for PaneType {
             #[cfg(debug_assertions)]
             PaneTypeFile::Logs => PaneType::Logs,
             PaneTypeFile::Directories => PaneType::Directories,
+            PaneTypeFile::LikedSongs => PaneType::LikedSongs,
             PaneTypeFile::Artists => PaneType::Artists,
             PaneTypeFile::AlbumArtists => PaneType::AlbumArtists,
             PaneTypeFile::Albums => PaneType::Albums,
@@ -1196,6 +1199,11 @@ impl Default for TabsFile {
                         pane: PaneOrSplitFile::Pane(PaneTypeFile::Search),
                     }],
                 },
+            },
+            TabFile {
+                name: "Liked Songs".to_owned(),
+                border_type: BorderTypeFile::None,
+                pane: PaneOrSplitFile::Pane(PaneTypeFile::LikedSongs),
             },
         ])
     }

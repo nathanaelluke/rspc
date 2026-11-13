@@ -22,6 +22,96 @@ use crate::{
     },
 };
 
+mod sorting {
+    use super::*;
+    use crate::{
+        config::sort_mode::{SongSort, SongSortKey},
+        shared::{
+            events::{AppEvent, ClientRequest, WorkRequest},
+            mpd_client_ext::MpdDelete,
+        },
+        tests::fixtures::{app_event_channel, client_request_channel, work_request_channel},
+        ui::{
+            browser::MoveDirection,
+            dirstack::{DirStack, DirStackItem, Path},
+        },
+    };
+    use crossbeam::channel::{Receiver, Sender};
+
+    fn row(name: &str, added: i64) -> DirOrSong {
+        let mut song = song(name);
+        song.metadata.insert("title".into(), name.into());
+        song.added = chrono::DateTime::from_timestamp(added, 0);
+        DirOrSong::Song(song)
+    }
+
+    #[rstest]
+    fn sorting_is_per_playlist_and_keeps_backend_positions_without_sending_mutations(
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(
+            app_event_channel,
+            work_request_channel,
+            client_request_channel.clone(),
+        );
+        let mut screen = PlaylistsPane::new(&ctx);
+        screen.stack = DirStack::new(vec![dir("First"), dir("Second")]);
+        screen.stack.insert(
+            Path::new().join("First"),
+            vec![row("Zulu", 10), row("Alpha", 20)],
+        );
+        screen.stack.insert(
+            Path::new().join("Second"),
+            vec![row("Old", 100), row("New", 200)],
+        );
+        screen.stack.enter();
+        screen.change_sort(Some(SongSortKey::Title), &ctx).unwrap();
+        assert_eq!(screen.stack.current().items[0].as_path(), "Alpha");
+        screen.stack.current_mut().select_idx(0, 0);
+        let delete = screen.delete_items(false);
+        match delete.as_slice() {
+            [MpdDelete::SongInPlaylist { playlist, range }] => {
+                assert_eq!(playlist.as_ref(), "First");
+                assert_eq!(range.start, 1);
+                assert_eq!(range.end, None);
+            }
+            other => panic!("expected one playlist deletion, got {other:?}"),
+        }
+        screen.move_selected(MoveDirection::Down, &ctx).unwrap();
+        screen.stack.leave();
+        screen.stack.current_mut().select_idx(1, 0);
+        screen.stack.enter();
+        screen.change_sort(Some(SongSortKey::Recent), &ctx).unwrap();
+        assert_eq!(screen.stack.current().items[0].as_path(), "New");
+        assert_eq!(
+            ctx.collection_sorts.borrow().get("playlist:First"),
+            SongSort::new(SongSortKey::Title)
+        );
+        assert_eq!(
+            ctx.collection_sorts.borrow().get("playlist:Second"),
+            SongSort::new(SongSortKey::Recent)
+        );
+        screen.stack.leave();
+        screen.stack.current_mut().select_idx(0, 0);
+        screen.restore_sort(&ctx);
+        assert_eq!(screen.stack.next().unwrap().items[0].as_path(), "Alpha");
+        screen.stack.enter();
+        screen.change_sort(None, &ctx).unwrap();
+        assert_eq!(screen.stack.current().items[0].as_path(), "Zulu");
+        screen
+            .change_sort(Some(SongSortKey::Original), &ctx)
+            .unwrap();
+        assert_eq!(screen.stack.current().items[0].as_path(), "Zulu");
+        assert!(!screen.stack.current().has_sort());
+        assert!(
+            client_request_channel.1.try_recv().is_err(),
+            "view sorting must not send playlist changes"
+        );
+    }
+}
+
 mod on_idle_event {
     use super::*;
     use crate::{

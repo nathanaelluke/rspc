@@ -216,6 +216,12 @@ pub trait MpdCommand {
 
 #[allow(dead_code)]
 pub trait MpdClient: Sized {
+    fn add_liked_tracks(&mut self, _uris: &[String]) -> MpdResult<usize> {
+        Err(MpdError::Generic(
+            "Liked Songs is not supported by this server".into(),
+        ))
+    }
+
     fn selection_songs(&mut self, _path: &str) -> MpdResult<Vec<Song>> {
         Err(MpdError::Generic(
             "Recursive selections are not supported by this server".into(),
@@ -396,6 +402,25 @@ pub trait MpdClient: Sized {
 }
 
 impl MpdClient for Client<'_> {
+    fn add_liked_tracks(&mut self, uris: &[String]) -> MpdResult<usize> {
+        self.with_catalog_timeout(|client| {
+            let mut total = 0;
+            for chunk in uris.chunks(1000) {
+                let args = chunk.iter().map(|uri| uri.quote_and_escape()).join(" ");
+                client.execute(&format!("rspc_library_add {args}"))?;
+                let values: MpdList = client.read_response()?;
+                let added = values
+                    .0
+                    .first()
+                    .ok_or_else(|| MpdError::Parse("missing library update count".into()))?;
+                total += added
+                    .parse::<usize>()
+                    .map_err(|error| MpdError::Parse(error.to_string()))?;
+            }
+            Ok(total)
+        })
+    }
+
     fn selection_songs(&mut self, path: &str) -> MpdResult<Vec<Song>> {
         self.with_catalog_timeout(|client| {
             client.execute(&format!("listallinfo {}", path.quote_and_escape()))?;

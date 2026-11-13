@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn playlist_and_library_rows_keep_addition_dates_separate_from_release_dates() {
+    for key in ["item", "track"] {
+        let mut row = json!({"added_at":"2026-11-01T10:00:00-05:00"});
+        row[key] = playlist_track(0);
+        let track = track_from_playlist_item(&row).unwrap();
+        assert_eq!(
+            track.added_at.unwrap().to_rfc3339(),
+            "2026-11-01T15:00:00+00:00"
+        );
+        row["added_at"] = json!("bad date");
+        assert!(track_from_playlist_item(&row).unwrap().added_at.is_none());
+        row["added_at"] = Value::Null;
+        assert!(track_from_playlist_item(&row).unwrap().added_at.is_none());
+    }
+}
+
+#[tokio::test]
+async fn adding_liked_songs_updates_the_library_without_touching_playlists() {
+    let catalog = Arc::new(Catalog::new(true));
+    let original = catalog.liked().await.unwrap();
+    let mut new = original[0].clone();
+    new.uri = Some("spotify:track:demo-new".into());
+    new.name = "A new liked song".into();
+    catalog.remember(vec![new.clone()]).await;
+    let uri = new.uri.clone().unwrap();
+    assert_eq!(
+        catalog
+            .add_liked(&[uri.clone(), uri.clone()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(catalog.add_liked(&[uri]).await.unwrap(), 0);
+    let liked = catalog.liked().await.unwrap();
+    assert_eq!(liked.len(), original.len() + 1);
+    assert_eq!(liked[0], new);
+    assert_eq!(catalog.playlist_tracks("Demo Mix").await.unwrap(), original);
+    assert!(catalog.add_liked(&["mpd:file.flac".into()]).await.is_err());
+}
+
+#[test]
 fn persistent_pages_are_partitioned_by_account_without_storing_its_name() {
     let first = account_namespace(Some("first-user"));
     assert_eq!(first, account_namespace(Some("first-user")));
@@ -907,4 +948,58 @@ async fn prefetching_new_detail_pages_does_not_reset_library_browsers() {
     assert_eq!(catalog.content_revision.load(Ordering::Relaxed), 2);
     tokio::task::yield_now().await;
     drop(catalog.disk_writes.lock().await);
+}
+
+#[tokio::test]
+async fn album_recency_uses_library_dates_and_never_playlist_dates() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut catalog = Catalog::new(false);
+    catalog.disk_root = directory.path().join("catalog");
+    catalog.versions.get_mut().unwrap().clear();
+    let raw = playlist_track(0);
+    let mut album = raw["album"].clone();
+    album["uri"] = json!("spotify:album:album1");
+    album["rspc_track_uris"] = json!([raw["uri"]]);
+    cache_page(
+        &catalog,
+        "me/albums",
+        0,
+        vec![json!({"album":album,"added_at":"2026-01-02T00:00:00Z"})],
+        1,
+    );
+    cache_page(
+        &catalog,
+        "me/tracks",
+        0,
+        vec![json!({"track":raw,"added_at":"2026-01-01T00:00:00Z"})],
+        1,
+    );
+    let catalog = Arc::new(catalog);
+    let mut cached = track_from_json(&raw).unwrap();
+    cached.added_at = Some("2099-01-01T00:00:00Z".parse().unwrap());
+    catalog.remember(vec![cached]).await;
+    *catalog.cooldown.lock().await = Some(std::time::Instant::now() + Duration::from_secs(60));
+    let tracks = catalog.album_tracks_many(&[album.clone()]).await.unwrap();
+    assert_eq!(
+        tracks[0].added_at, None,
+        "playlist metadata must not leak into album recency"
+    );
+    catalog.saved_albums().await.unwrap();
+    let tracks = catalog.album_tracks_many(&[album.clone()]).await.unwrap();
+    assert_eq!(
+        tracks[0].added_at.unwrap().to_rfc3339(),
+        "2026-01-02T00:00:00+00:00"
+    );
+    catalog.liked().await.unwrap();
+    let tracks = catalog.album_tracks_many(&[album.clone()]).await.unwrap();
+    assert_eq!(
+        tracks[0].added_at.unwrap().to_rfc3339(),
+        "2026-01-01T00:00:00+00:00"
+    );
+    catalog.set_library_dates("spotify:track:", []).await;
+    let tracks = catalog.album_tracks_many(&[album]).await.unwrap();
+    assert_eq!(
+        tracks[0].added_at.unwrap().to_rfc3339(),
+        "2026-01-02T00:00:00+00:00"
+    );
 }

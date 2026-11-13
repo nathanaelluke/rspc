@@ -61,5 +61,11 @@
                 (size: "100%", pane: Pane(Search)),
             ]),
         ),
+        (
+            name: "Liked Songs",
+            pane: Split(direction: Vertical, panes: [
+                (size: "100%", pane: Pane(LikedSongs)),
+            ]),
+        ),
     ],
 )

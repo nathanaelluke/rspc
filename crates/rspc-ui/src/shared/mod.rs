@@ -1,4 +1,5 @@
 pub mod cmp;
+pub mod collection_sort;
 pub mod config_read;
 pub mod dependencies;
 pub mod duration_format;

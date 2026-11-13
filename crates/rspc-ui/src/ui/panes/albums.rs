@@ -54,6 +54,7 @@ impl AlbumsPane {
 
 impl Pane for AlbumsPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
+        self.restore_sort(ctx);
         self.browser
             .render(area, frame.buffer_mut(), &mut self.stack, ctx);
 
@@ -84,6 +85,7 @@ impl Pane for AlbumsPane {
     fn on_event(&mut self, event: &mut UiEvent, _is_visible: bool, ctx: &Ctx) -> Result<()> {
         match event {
             UiEvent::Database => {
+                self.navigation = self.stack.path().as_slice().first().cloned();
                 ctx.query()
                     .id(INIT)
                     .replace_id(INIT)
@@ -173,11 +175,28 @@ impl Pane for AlbumsPane {
             }
             _ => {}
         }
+        self.restore_sort(ctx);
         Ok(())
     }
 }
 
 impl BrowserPane<DirOrSong> for AlbumsPane {
+    fn sort_context(&self) -> Option<String> {
+        match self.stack.path().as_slice() {
+            [album] => Some(format!("album:{album}")),
+            _ => None,
+        }
+    }
+
+    fn preview_sort_context(&self) -> Option<String> {
+        self.stack
+            .path()
+            .is_empty()
+            .then(|| self.stack.current().selected())
+            .flatten()
+            .map(|item| format!("album:{}", item.as_path()))
+    }
+
     fn stack(&self) -> &DirStack<DirOrSong, ListState> {
         &self.stack
     }
@@ -243,5 +262,61 @@ impl BrowserPane<DirOrSong> for AlbumsPane {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::sort_mode::{SongSort, SongSortKey},
+        tests::fixtures::ctx,
+        ui::dirstack::Path,
+    };
+    use rstest::rstest;
+
+    #[rstest]
+    fn album_song_sort_is_remembered_without_sorting_album_names(ctx: Ctx) {
+        let mut pane = AlbumsPane::new(&ctx);
+        let mut song = Song {
+            file: "new".into(),
+            added: chrono::DateTime::from_timestamp(20, 0),
+            ..Default::default()
+        };
+        song.metadata.insert("title".into(), "New".into());
+        let mut old = song.clone();
+        old.file = "old".into();
+        old.added = chrono::DateTime::from_timestamp(10, 0);
+        pane.stack = DirStack::new(vec![
+            DirOrSong::name_only("Mix".into()),
+            DirOrSong::name_only("Other".into()),
+        ]);
+        pane.stack.insert(
+            Path::new().join("Mix"),
+            vec![DirOrSong::Song(old), DirOrSong::Song(song)],
+        );
+        assert!(
+            pane.sort_context().is_none(),
+            "album list must keep its own ordering"
+        );
+        pane.stack.enter();
+        pane.change_sort(Some(SongSortKey::Recent), &ctx)
+            .expect("sort album songs");
+        assert_eq!(pane.stack.current().items[0].as_path(), "new");
+        assert_eq!(
+            ctx.collection_sorts.borrow().get("album:Mix"),
+            SongSort::new(SongSortKey::Recent)
+        );
+        assert_eq!(
+            ctx.collection_sorts.borrow().get("playlist:Mix"),
+            SongSort::default()
+        );
+        pane.stack.leave();
+        pane.restore_sort(&ctx);
+        assert_eq!(pane.stack.current().items[0].as_path(), "Mix");
+        assert_eq!(
+            pane.stack.next().expect("preview").items[0].as_path(),
+            "new"
+        );
     }
 }

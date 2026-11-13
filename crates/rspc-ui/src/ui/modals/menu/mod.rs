@@ -37,6 +37,78 @@ pub mod modal;
 mod multi_action_section;
 mod select_section;
 
+pub fn add_song_save_actions(
+    section: &mut ListSection,
+    ctx: &Ctx,
+    songs: impl FnOnce(&mut Client<'_>) -> Result<Vec<String>> + Clone + Send + Sync + 'static,
+) {
+    let playlist_songs = songs.clone();
+    section.add_item("Add to playlist", move |ctx| {
+        let paths = ctx.query_sync(playlist_songs)?;
+        if paths.is_empty() {
+            status_warn!("No songs selected");
+            return Ok(());
+        }
+        modal!(
+            ctx,
+            create_save_modal(paths, None, DuplicateStrategy::Ask, ctx)?
+        );
+        Ok(())
+    });
+
+    if ctx.supported_commands.contains("rspc_library_add") {
+        section.add_item("Add to Liked Songs", move |ctx| {
+            ctx.command(move |client| {
+                let paths = songs(client)?;
+                if paths.is_empty() {
+                    status_warn!("No songs selected");
+                    return Ok(());
+                }
+                anyhow::ensure!(
+                    paths.iter().all(|uri| uri.starts_with("spotify:track:")),
+                    "Liked Songs accepts Spotify tracks only"
+                );
+                let added = client.add_liked_tracks(&paths)?;
+                if added == 0 {
+                    status_info!("Already in Liked Songs");
+                } else {
+                    let suffix = if added == 1 { "" } else { "s" };
+                    status_info!("Added {added} song{suffix} to Liked Songs");
+                }
+                Ok(())
+            });
+            Ok(())
+        });
+    }
+}
+
+pub fn song_sort_modal<'a>(context: String, ctx: &Ctx) -> MenuModal<'a> {
+    use crate::config::sort_mode::{SongSort, SongSortKey};
+    let options = [
+        (SongSortKey::Original, "Original order"),
+        (SongSortKey::Recent, "Recently added"),
+        (SongSortKey::Title, "Title"),
+        (SongSortKey::Artist, "Artist"),
+        (SongSortKey::Album, "Album"),
+        (SongSortKey::Duration, "Duration"),
+    ];
+    MenuModal::new(ctx)
+        .list_section(ctx, move |mut section| {
+            for (by, label) in options {
+                let context = context.clone();
+                section.add_item(label, move |ctx| {
+                    ctx.collection_sorts
+                        .borrow_mut()
+                        .set(&context, SongSort::new(by))?;
+                    ctx.render()?;
+                    Ok(())
+                });
+            }
+            Some(section)
+        })
+        .build()
+}
+
 trait Section {
     fn down(&mut self) -> bool;
     fn up(&mut self) -> bool;
@@ -653,4 +725,35 @@ pub fn delete_from_playlist_or_show_confirmation(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod save_action_tests {
+    use super::*;
+    use crate::tests::fixtures::ctx;
+    use rstest::rstest;
+
+    #[rstest]
+    fn liked_songs_is_offered_only_by_servers_that_support_it(mut ctx: Ctx) {
+        for supported in [false, true] {
+            if supported {
+                ctx.supported_commands.insert("rspc_library_add".into());
+            } else {
+                ctx.supported_commands.remove("rspc_library_add");
+            }
+            let mut section = ListSection::default();
+            add_song_save_actions(&mut section, &ctx, |_: &mut Client<'_>| Ok(Vec::new()));
+            let labels = section
+                .items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>();
+            let expected = if supported {
+                vec!["Add to playlist", "Add to Liked Songs"]
+            } else {
+                vec!["Add to playlist"]
+            };
+            assert_eq!(labels, expected);
+        }
+    }
 }

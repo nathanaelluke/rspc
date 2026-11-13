@@ -63,6 +63,18 @@ impl Catalog {
         })
         .await?;
         let tracks = Arc::new(self.remember(tracks).await);
+        if path == "me/tracks"
+            && epoch == self.playlist_view_epoch.load(Ordering::Relaxed)
+            && generation == self.generation.load(Ordering::Relaxed)
+        {
+            self.set_library_dates(
+                "spotify:track:",
+                tracks
+                    .iter()
+                    .filter_map(|track| Some((track.uri.clone()?, track.added_at?))),
+            )
+            .await;
+        }
         let mut views = self.playlist_views.lock().await;
         if tracks.len() <= MAX_TRACKS
             && epoch == self.playlist_view_epoch.load(Ordering::Relaxed)

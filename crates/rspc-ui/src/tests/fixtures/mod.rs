@@ -89,6 +89,7 @@ pub fn ctx(
         input: InputManager::default(),
         key_resolver,
         cached_queue_time_total: Duration::default(),
+        collection_sorts: RefCell::new(crate::shared::collection_sort::CollectionSorts::default()),
     }
 }
 

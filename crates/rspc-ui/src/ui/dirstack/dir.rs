@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap, HashSet},
     ops::{Bound, RangeBounds},
 };
 
@@ -8,11 +8,21 @@ use ratatui::{text::Span, widgets::ListItem};
 
 use super::{DirStackItem, state::DirState};
 use crate::{
-    config::theme::properties::{Property, SongProperty},
+    config::{
+        sort_mode::{SongSort, SongSortKey},
+        theme::properties::{Property, SongProperty},
+    },
     ctx::Ctx,
     shared::macros::status_warn,
     ui::{FILTER_PREFIX, dirstack::ScrollingState, input::BufferId},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct RowIdentity<'a> {
+    path: &'a str,
+    added: Option<chrono::DateTime<chrono::Utc>>,
+    occurrence: usize,
+}
 
 #[derive(Debug)]
 pub struct Dir<T, S>
@@ -26,6 +36,9 @@ where
     matched_item_count: usize,
     pub filter_buffer_id: BufferId,
     pub filter_active: bool,
+    view_sort: SongSort,
+    // Backend positions travel with rows when the visible order changes.
+    original_order: Vec<usize>,
 }
 
 impl<T, S> Default for Dir<T, S>
@@ -41,6 +54,8 @@ where
             matched_item_count: 0,
             filter_buffer_id: BufferId::new(),
             filter_active: false,
+            view_sort: SongSort::default(),
+            original_order: Vec::new(),
         }
     }
 }
@@ -54,11 +69,7 @@ where
     pub fn new(root: Vec<T>) -> Self {
         let mut result = Self {
             loaded: true,
-            items: Vec::new(),
-            state: DirState::default(),
-            matched_item_count: 0,
-            filter_buffer_id: BufferId::new(),
-            filter_active: false,
+            ..Self::default()
         };
 
         if !root.is_empty() {
@@ -83,10 +94,143 @@ where
             loaded: true,
             items,
             state,
-            matched_item_count: 0,
-            filter_buffer_id: BufferId::new(),
-            filter_active: false,
+            ..Self::default()
         };
+    }
+
+    pub fn source_index(&self, index: usize) -> usize {
+        self.original_order.get(index).copied().unwrap_or(index)
+    }
+
+    fn row_identities(&self) -> Vec<RowIdentity<'_>> {
+        let mut indices = (0..self.items.len()).collect::<Vec<_>>();
+        indices.sort_unstable_by_key(|index| self.source_index(*index));
+        let mut occurrences = HashMap::new();
+        let mut identities = vec![None; self.items.len()];
+        for index in indices {
+            let item = &self.items[index];
+            let path = item.as_path();
+            let added = item.as_song().and_then(|song| song.added);
+            let occurrence = occurrences.entry((path, added)).or_insert(0);
+            identities[index] = Some(RowIdentity {
+                path,
+                added,
+                occurrence: *occurrence,
+            });
+            *occurrence += 1;
+        }
+        identities.into_iter().flatten().collect()
+    }
+
+    pub fn restore_selection(&mut self, previous: &Self, scrolloff: usize) {
+        let previous_ids = previous.row_identities();
+        let selected = previous
+            .state
+            .get_selected()
+            .and_then(|index| previous_ids.get(index))
+            .copied();
+        let marked = previous
+            .marked()
+            .iter()
+            .filter_map(|index| previous_ids.get(*index))
+            .copied()
+            .collect::<HashSet<_>>();
+        let current_ids = self.row_identities();
+        let selected_index = current_ids
+            .iter()
+            .position(|identity| Some(*identity) == selected)
+            .or_else(|| previous.state.get_selected())
+            .or_else(|| self.state.get_selected());
+        let marked_indices = current_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, identity)| marked.contains(identity).then_some(index))
+            .collect::<BTreeSet<_>>();
+        self.state.set_viewport_len(previous.state.viewport_len());
+        self.select_idx_opt(selected_index, scrolloff);
+        *self.marked_mut() = marked_indices;
+    }
+
+    pub fn has_sort(&self) -> bool {
+        self.view_sort != SongSort::default()
+    }
+
+    pub fn sort_songs(&mut self, sort: SongSort, scrolloff: usize) {
+        if self.view_sort == sort {
+            return;
+        }
+        let selected = self.state.get_selected();
+        let has_viewport = self.state.viewport_len().is_some_and(|height| height > 0);
+        let marked = self.marked().clone();
+        let original = if self.original_order.is_empty() {
+            (0..self.items.len()).collect()
+        } else {
+            std::mem::take(&mut self.original_order)
+        };
+        let options = sort.options();
+        let mut indexed = std::mem::take(&mut self.items)
+            .into_iter()
+            .zip(original)
+            .enumerate()
+            .collect::<Vec<_>>();
+        indexed.sort_by(|(_, (a, original_a)), (_, (b, original_b))| {
+            let order = match sort.by {
+                SongSortKey::Original => {
+                    let order = original_a.cmp(original_b);
+                    if sort.reverse { order.reverse() } else { order }
+                }
+                SongSortKey::Recent => {
+                    match (
+                        a.as_song().and_then(|song| song.added),
+                        b.as_song().and_then(|song| song.added),
+                    ) {
+                        (Some(a), Some(b)) => {
+                            if sort.reverse {
+                                b.cmp(&a)
+                            } else {
+                                a.cmp(&b)
+                            }
+                        }
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                }
+                _ => {
+                    let order = match (a.as_song(), b.as_song()) {
+                        (Some(a), Some(b)) => a
+                            .with_custom_sort(&options)
+                            .cmp(&b.with_custom_sort(&options)),
+                        _ => crate::shared::cmp::StringCompare::from(&options)
+                            .compare(a.as_path(), b.as_path()),
+                    };
+                    if sort.reverse { order.reverse() } else { order }
+                }
+            };
+            order.then_with(|| original_a.cmp(original_b))
+        });
+        self.unmark_all();
+        let mut new_selected = None;
+        for (index, (previous, (item, original))) in indexed.into_iter().enumerate() {
+            if Some(previous) == selected {
+                new_selected = Some(index);
+            }
+            if marked.contains(&previous) {
+                self.state.mark(index);
+            }
+            self.items.push(item);
+            self.original_order.push(original);
+        }
+        if has_viewport {
+            self.select_idx_opt(new_selected, scrolloff);
+        } else {
+            self.select_idx_opt((!self.items.is_empty()).then_some(0), scrolloff);
+            self.state.set_offset(0);
+        }
+        self.view_sort = sort;
+        if sort == SongSort::default() {
+            self.original_order.clear();
+        }
     }
 
     pub fn set_filter_active(&mut self, active: bool) {
@@ -258,16 +402,22 @@ where
     pub fn remove(&mut self, idx: usize) {
         if idx < self.items.len() {
             self.items.remove(idx);
+            if !self.original_order.is_empty() {
+                let removed = self.original_order.remove(idx);
+                for original in &mut self.original_order {
+                    if *original > removed {
+                        *original -= 1;
+                    }
+                }
+            }
         }
         self.state.remove(idx);
     }
 
     pub fn remove_all_marked(&mut self) {
-        for i in 0..self.items.len() {
-            if self.state.marked.contains(&i) {
-                self.items.remove(i);
-                self.state.remove(i);
-            }
+        let marked = self.marked().iter().copied().rev().collect::<Vec<_>>();
+        for index in marked {
+            self.remove(index);
         }
     }
 
@@ -391,6 +541,149 @@ mod tests {
     use super::{Dir, DirState};
     use crate::{ctx::Ctx, tests::fixtures::ctx, ui::input::BufferId};
 
+    mod playlist_sorting {
+        use super::*;
+        use crate::{
+            config::sort_mode::{SongSort, SongSortKey},
+            mpd::commands::Song,
+        };
+        use std::collections::BTreeSet;
+
+        fn playlist() -> Dir<Song, ListState> {
+            let rows = [
+                ("Zulu", "C", "B", "same", Some(1), 100),
+                ("Alpha", "B", "C", "second", Some(3), 300),
+                ("Zulu", "A", "A", "same", Some(2), 200),
+                ("Unknown", "D", "D", "unknown", None, 50),
+            ];
+            let songs = rows
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(index, (title, artist, album, uri, added, duration))| Song {
+                        id: u32::try_from(index).expect("fixture id"),
+                        file: uri.into(),
+                        added: added
+                            .and_then(|day| chrono::DateTime::from_timestamp(day * 86_400, 0)),
+                        duration: Some(std::time::Duration::from_secs(duration)),
+                        metadata: std::collections::HashMap::from([
+                            ("title".into(), title.into()),
+                            ("artist".into(), artist.into()),
+                            ("album".into(), album.into()),
+                            ("date".into(), "2099".into()),
+                        ]),
+                        ..Default::default()
+                    },
+                )
+                .collect();
+            let mut dir = Dir::new(songs);
+            dir.state.set_content_and_viewport_len(4, 4);
+            dir
+        }
+
+        fn ids(dir: &Dir<Song, ListState>) -> Vec<u32> {
+            dir.items.iter().map(|song| song.id).collect()
+        }
+
+        #[test]
+        fn restoring_sort_before_first_render_starts_at_the_top() {
+            let mut dir = Dir::new(playlist().items);
+            dir.sort_songs(SongSort::new(SongSortKey::Recent), 2);
+            assert_eq!(ids(&dir), [1, 2, 0, 3]);
+            assert_eq!(dir.state.get_selected(), Some(0));
+            assert_eq!(dir.state.offset(), 0);
+        }
+
+        #[test]
+        fn recently_added_keeps_missing_dates_last_in_both_directions() {
+            let mut dir = playlist();
+            let mut sort = SongSort::new(SongSortKey::Recent);
+            dir.sort_songs(sort, 0);
+            assert_eq!(ids(&dir), [1, 2, 0, 3]);
+            sort.reverse = false;
+            dir.sort_songs(sort, 0);
+            assert_eq!(ids(&dir), [0, 2, 1, 3]);
+        }
+
+        #[test]
+        fn changing_sort_preserves_marked_and_selected_occurrences_and_original_positions() {
+            let mut dir = playlist();
+            dir.select_idx(2, 0);
+            dir.state.mark(0);
+            dir.state.mark(2);
+            dir.sort_songs(SongSort::new(SongSortKey::Recent), 0);
+            assert_eq!(dir.selected().expect("selected duplicate").id, 2);
+            assert_eq!(dir.marked(), &BTreeSet::from([1, 2]));
+            for (index, song) in dir.items.iter().enumerate() {
+                assert_eq!(
+                    dir.source_index(index),
+                    usize::try_from(song.id).expect("original position")
+                );
+            }
+            dir.sort_songs(SongSort::default(), 0);
+            assert_eq!(ids(&dir), [0, 1, 2, 3]);
+            assert_eq!(dir.selected().expect("selected duplicate").id, 2);
+            assert_eq!(dir.marked(), &BTreeSet::from([0, 2]));
+        }
+
+        #[test]
+        fn columns_sort_by_their_metadata_and_restore_the_playlist_order() {
+            let mut dir = playlist();
+            for (by, expected) in [
+                (SongSortKey::Title, [1, 3, 2, 0]),
+                (SongSortKey::Artist, [2, 1, 0, 3]),
+                (SongSortKey::Album, [2, 0, 1, 3]),
+                (SongSortKey::Duration, [3, 0, 2, 1]),
+            ] {
+                dir.sort_songs(SongSort::new(by), 0);
+                assert_eq!(ids(&dir), expected, "{by}");
+                dir.sort_songs(SongSort::default(), 0);
+                assert_eq!(ids(&dir), [0, 1, 2, 3]);
+            }
+        }
+
+        #[test]
+        fn removing_sorted_marked_rows_keeps_the_remaining_backend_positions_valid() {
+            let mut dir = playlist();
+            dir.state.mark(0);
+            dir.state.mark(2);
+            dir.sort_songs(SongSort::new(SongSortKey::Recent), 0);
+            dir.remove_all_marked();
+            assert_eq!(ids(&dir), [1, 3]);
+            assert_eq!([dir.source_index(0), dir.source_index(1)], [0, 1]);
+            dir.sort_songs(SongSort::default(), 0);
+            assert_eq!(ids(&dir), [1, 3]);
+        }
+
+        #[test]
+        fn refreshing_a_recently_sorted_playlist_keeps_marks_on_the_same_occurrences() {
+            let mut previous = playlist();
+            previous.select_idx(2, 0);
+            previous.state.mark(0);
+            previous.state.mark(2);
+            let sort = SongSort::new(SongSortKey::Recent);
+            previous.sort_songs(sort, 0);
+            let mut refreshed = playlist();
+            refreshed.items.push(Song {
+                id: 4,
+                file: "new".into(),
+                added: chrono::DateTime::from_timestamp(4 * 86_400, 0),
+                ..Default::default()
+            });
+            refreshed.state.set_content_len(Some(5));
+            refreshed.sort_songs(sort, 0);
+            refreshed.restore_selection(&previous, 0);
+            assert_eq!(ids(&refreshed), [4, 1, 2, 0, 3]);
+            assert_eq!(refreshed.selected().expect("selected occurrence").id, 2);
+            let marked = refreshed
+                .marked()
+                .iter()
+                .map(|index| refreshed.items[*index].id)
+                .collect::<Vec<_>>();
+            assert_eq!(marked, [2, 0]);
+        }
+    }
+
     fn create_subject() -> Dir<String, ListState> {
         let mut res = Dir {
             loaded: true,
@@ -402,6 +695,7 @@ mod tests {
             matched_item_count: 0,
             filter_buffer_id: BufferId::new(),
             filter_active: false,
+            ..Default::default()
         };
         res.state
             .set_content_and_viewport_len(res.items.len(), res.items.len());

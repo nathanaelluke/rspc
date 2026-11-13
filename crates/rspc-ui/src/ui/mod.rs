@@ -641,6 +641,14 @@ impl<'ui> Ui<'ui> {
                         );
                     }
                 }
+                GlobalAction::SwitchToTabIndex(index) => {
+                    if let Some(name) = ctx.config.tabs.names.get(*index).cloned() {
+                        self.change_tab(name, ctx)?;
+                        ctx.render()?;
+                    } else {
+                        status_error!("No tab at position {}", index + 1);
+                    }
+                }
                 GlobalAction::NextTrack => {}
                 GlobalAction::PreviousTrack => {}
                 GlobalAction::Stop => {}

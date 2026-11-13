@@ -357,12 +357,11 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[test]
-    fn catalog_deadline_is_restored_after_success_and_failure() {
-        let (stream, _peer) = UnixStream::pair().expect("socket pair");
+    fn pair() -> (Client<'static>, UnixStream) {
+        let (stream, peer) = UnixStream::pair().expect("socket pair");
         let stream = TcpOrUnixStream::Unix(stream);
-        let mut client = Client {
-            name: "timeout-test",
+        let client = Client {
+            name: "test",
             rx: BufReader::new(stream.try_clone().expect("clone socket")),
             stream,
             addr: MpdAddress::default(),
@@ -373,6 +372,31 @@ mod tests {
             config: None,
             supported_commands: HashSet::new(),
         };
+        (client, peer)
+    }
+
+    #[test]
+    fn liked_songs_command_sends_the_selected_uris_and_reads_the_update_count() {
+        let (mut client, mut peer) = pair();
+        peer.write_all(b"library_added: 2\nOK\n").expect("reply");
+        let uris = vec![
+            "spotify:track:first".to_owned(),
+            "spotify:track:second".to_owned(),
+        ];
+        assert_eq!(client.add_liked_tracks(&uris).expect("like tracks"), 2);
+        let mut command = String::new();
+        BufReader::new(peer)
+            .read_line(&mut command)
+            .expect("read command");
+        assert_eq!(
+            command,
+            "rspc_library_add \"spotify:track:first\" \"spotify:track:second\"\n"
+        );
+    }
+
+    #[test]
+    fn catalog_deadline_is_restored_after_success_and_failure() {
+        let (mut client, _peer) = pair();
         let ordinary = Some(Duration::from_secs(5));
         client
             .set_read_timeout(ordinary)

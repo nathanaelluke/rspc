@@ -92,6 +92,7 @@ pub struct Catalog {
     pub tracks: Mutex<HashMap<String, TrackInfo>>,
     artwork: Mutex<artwork::Memory>,
     albums: Mutex<HashMap<String, Value>>,
+    library_added: Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>,
     playlists: Mutex<BTreeMap<String, String>>,
     cache: Mutex<HashMap<String, Arc<Cached>>>,
     gates: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
@@ -115,6 +116,7 @@ pub struct Catalog {
     cooldown: Mutex<Option<std::time::Instant>>,
     versions: std::sync::Mutex<HashMap<String, u64>>,
     demo_playlists: Mutex<BTreeMap<String, Vec<TrackInfo>>>,
+    demo_liked: Mutex<Vec<TrackInfo>>,
 }
 impl Catalog {
     pub fn new(demo: bool) -> Self {
@@ -150,9 +152,11 @@ impl Catalog {
             cooldown: Mutex::new(None),
             versions: std::sync::Mutex::new(versions),
             demo_playlists: Mutex::new(BTreeMap::from([("Demo Mix".into(), demo_tracks())])),
+            demo_liked: Mutex::new(demo_tracks()),
             tracks: Mutex::new(HashMap::new()),
             artwork: Mutex::new(Default::default()),
             albums: Mutex::new(HashMap::new()),
+            library_added: Mutex::new(HashMap::new()),
             playlists: Mutex::new(BTreeMap::new()),
             cache: Mutex::new(HashMap::new()),
             gates: Mutex::new(HashMap::new()),
@@ -183,6 +187,7 @@ impl Catalog {
         self.tag_cache.lock().await.clear();
         self.tracks.lock().await.clear();
         self.albums.lock().await.clear();
+        self.library_added.lock().await.clear();
         *self.people_cache.lock().await = None;
         *self.playlist_fetched.lock().await = None;
         let _writes = self.disk_writes.lock().await;
@@ -481,9 +486,47 @@ impl Catalog {
     }
     pub async fn liked(self: &Arc<Self>) -> Result<Vec<TrackInfo>> {
         if self.demo {
-            return Ok(self.remember(demo_tracks()).await);
+            return Ok(self.remember(self.demo_liked.lock().await.clone()).await);
         }
         Ok(self.playlist_view("me/tracks").await?.as_ref().clone())
+    }
+    pub async fn add_liked(self: &Arc<Self>, uris: &[String]) -> Result<usize> {
+        ensure!(!uris.is_empty(), "No songs selected");
+        ensure!(
+            uris.iter().all(|uri| uri.starts_with("spotify:track:")),
+            "Liked Songs accepts Spotify tracks only"
+        );
+        let count = if self.demo {
+            let mut tracks = Vec::new();
+            for uri in uris {
+                tracks.extend(self.resolve(uri).await?);
+            }
+            let mut liked = self.demo_liked.lock().await;
+            let mut known: std::collections::HashSet<_> =
+                liked.iter().filter_map(|track| track.uri.clone()).collect();
+            tracks.retain(|track| {
+                track
+                    .uri
+                    .as_ref()
+                    .is_some_and(|uri| known.insert(uri.clone()))
+            });
+            let count = tracks.len();
+            liked.splice(0..0, tracks);
+            count
+        } else {
+            let count = crate::spotify::add_liked_tracks(uris).await?;
+            if count > 0 {
+                self.invalidate_resource("me/tracks").await.context(
+                    "Saved to Liked Songs, but could not refresh the local library cache",
+                )?;
+            }
+            count
+        };
+        if count > 0 {
+            self.tag_cache.lock().await.clear();
+            self.content_revision.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(count)
     }
     pub async fn recent(self: &Arc<Self>) -> Result<Vec<TrackInfo>> {
         if self.demo {
@@ -495,15 +538,33 @@ impl Catalog {
             .collect();
         Ok(self.remember(tracks).await)
     }
+    async fn set_library_dates(
+        &self,
+        prefix: &str,
+        entries: impl IntoIterator<Item = (String, chrono::DateTime<chrono::Utc>)>,
+    ) {
+        let mut dates = self.library_added.lock().await;
+        dates.retain(|uri, _| !uri.starts_with(prefix));
+        dates.extend(entries);
+    }
     pub async fn saved_albums(self: &Arc<Self>) -> Result<Vec<Value>> {
         if self.demo {
             return Ok(demo_albums());
         }
-        let albums: Vec<Value> = self
-            .pages("me/albums")
-            .await?
+        let items = self.pages("me/albums").await?;
+        self.set_library_dates(
+            "spotify:album:",
+            items.iter().filter_map(|item| {
+                Some((
+                    item["album"]["uri"].as_str()?.to_owned(),
+                    addition_date(item)?,
+                ))
+            }),
+        )
+        .await;
+        let albums: Vec<Value> = items
             .into_iter()
-            .map(|v| v["album"].clone())
+            .map(|item| item["album"].clone())
             .collect();
         let mut cache = self.albums.lock().await;
         for album in &albums {
@@ -641,9 +702,20 @@ impl Catalog {
                 known.insert(uri.clone(), track);
             }
         }
+        // Playlist timestamps in the track cache belong to that playlist.
+        // Album views use only known library membership dates.
+        let dates = self.library_added.lock().await;
         Ok(uris
             .iter()
-            .filter_map(|uri| known.get(uri).cloned())
+            .filter_map(|uri| {
+                let mut track = known.get(uri)?.clone();
+                let album_date = track
+                    .album_id
+                    .as_ref()
+                    .and_then(|id| dates.get(&format!("spotify:album:{id}")));
+                track.added_at = dates.get(uri).into_iter().chain(album_date).min().copied();
+                Some(track)
+            })
             .collect())
     }
     pub async fn resolve(self: &Arc<Self>, uri: &str) -> Result<Vec<TrackInfo>> {
@@ -947,8 +1019,17 @@ impl Catalog {
 pub fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
+fn addition_date(item: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    item["added_at"]
+        .as_str()?
+        .parse()
+        .ok()
+        .filter(|date: &chrono::DateTime<chrono::Utc>| date.timestamp() > 0)
+}
 fn track_from_playlist_item(item: &Value) -> Option<TrackInfo> {
-    track_from_json(&item["item"]).or_else(|| track_from_json(&item["track"]))
+    let mut track = track_from_json(&item["item"]).or_else(|| track_from_json(&item["track"]))?;
+    track.added_at = addition_date(item);
+    Some(track)
 }
 
 pub fn track_from_json(v: &Value) -> Option<TrackInfo> {
@@ -981,6 +1062,7 @@ pub fn track_from_json(v: &Value) -> Option<TrackInfo> {
         album_id: v["album"]["id"].as_str().map(String::from),
         image_url: v["album"]["images"][0]["url"].as_str().map(String::from),
         release_date: v["album"]["release_date"].as_str().map(String::from),
+        added_at: None,
         duration_ms: v["duration_ms"].as_u64().unwrap_or(0),
         id: v["id"].as_str().map(String::from),
         is_playable: v["is_playable"].as_bool().unwrap_or(true),
@@ -990,10 +1072,14 @@ pub fn track_from_json(v: &Value) -> Option<TrackInfo> {
     })
 }
 pub fn demo_tracks() -> Vec<TrackInfo> {
-    ["Morning Light", "Second Window", "After Hours"].iter().enumerate().map(|(i, name)| track_from_json(&json!({
+    ["Morning Light", "Second Window", "After Hours"].iter().enumerate().map(|(i, name)| {
+        let mut track = track_from_json(&json!({
         "id":format!("demo{}",i+1), "uri":format!("spotify:track:demo{}",i+1), "name":name, "duration_ms":180000 + i as u64 * 30000, "track_number":i+1,
         "artists":[{"id":"demo-artist","name":"The Example Ensemble"}], "album":{"id":"demo-album","name":"Example Sessions","release_date":"2026-01-01"}
-    })).unwrap()).collect()
+    })).unwrap();
+        track.added_at = chrono::DateTime::from_timestamp(1_767_225_600 + i as i64 * 86_400, 0);
+        track
+    }).collect()
 }
 fn demo_albums() -> Vec<Value> {
     vec![

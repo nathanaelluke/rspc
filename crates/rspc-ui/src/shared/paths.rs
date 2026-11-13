@@ -31,7 +31,7 @@ pub fn create_runtime_dir() -> io::Result<PathBuf> {
     Ok(path)
 }
 
-pub fn log_dir() -> io::Result<PathBuf> {
+pub fn state_dir() -> io::Result<PathBuf> {
     let state = ENV
         .var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -43,7 +43,13 @@ pub fn log_dir() -> io::Result<PathBuf> {
                 "cannot determine rspc state directory",
             )
         })?;
-    let path = state.join("rspc/logs");
+    let path = state.join("rspc");
+    private_dir(&path)?;
+    Ok(path)
+}
+
+pub fn log_dir() -> io::Result<PathBuf> {
+    let path = state_dir()?.join("logs");
     private_dir(&path)?;
     Ok(path)
 }

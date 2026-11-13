@@ -180,6 +180,10 @@ impl<'panes> PaneContainer<'panes> {
             .flat_map(|tab| tab.panes.panes_iter())
             .chain(ctx.config.theme.layout.panes_iter())
             .filter_map(|pane| match &pane.pane {
+                PaneType::LikedSongs => Some((
+                    pane.pane.clone(),
+                    Box::new(DirectoriesPane::liked_songs(ctx)) as Box<dyn BoxedPane>,
+                )),
                 PaneType::Browser {
                     root_tag,
                     separator,
@@ -237,12 +241,7 @@ impl<'panes> PaneContainer<'panes> {
                 *wrap,
                 *vertical_align,
             ))),
-            p @ PaneType::Volume { .. } => {
-                Ok(Panes::Others(self.others.get_mut(pane).with_context(
-                    || format!("expected pane to be defined {p:?}"),
-                )?))
-            }
-            p @ PaneType::Browser { .. } => {
+            p @ (PaneType::Volume { .. } | PaneType::Browser { .. } | PaneType::LikedSongs) => {
                 Ok(Panes::Others(self.others.get_mut(pane).with_context(
                     || format!("expected pane to be defined {p:?}"),
                 )?))

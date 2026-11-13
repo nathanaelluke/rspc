@@ -268,6 +268,7 @@ pub fn tracks(bytes: &[u8]) -> Vec<TrackInfo> {
                 explicit: false,
                 image_url: None,
                 release_date: get("Date").map(str::to_owned),
+                added_at: get("Added").and_then(|date| date.parse().ok()),
             })
         })
         .collect()

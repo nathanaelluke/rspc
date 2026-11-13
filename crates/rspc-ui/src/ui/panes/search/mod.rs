@@ -43,9 +43,9 @@ use crate::{
             info_list_modal::InfoListModal,
             input_modal::InputModal,
             menu::{
-                add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
-                create_rating_modal, create_save_modal, delete_from_playlist_or_show_confirmation,
-                modal::MenuModal,
+                add_song_save_actions, add_to_playlist_or_show_modal, create_add_modal,
+                create_delete_modal, create_rating_modal, create_save_modal,
+                delete_from_playlist_or_show_confirmation, modal::MenuModal,
             },
             select_modal::SelectModal,
         },
@@ -362,6 +362,9 @@ impl SearchPane {
             }
         } else if let Some(action) = event.claim_common() {
             match action.to_owned() {
+                CommonAction::Sort { .. } | CommonAction::ReverseSort => {
+                    status_warn!("Open a playlist or album to sort its songs");
+                }
                 CommonAction::Down => {
                     if config.wrap_navigation {
                         self.inputs.next();
@@ -584,6 +587,9 @@ impl SearchPane {
             }
         } else if let Some(action) = event.claim_common() {
             match action.to_owned() {
+                CommonAction::Sort { .. } | CommonAction::ReverseSort => {
+                    status_warn!("Open a playlist or album to sort its songs");
+                }
                 CommonAction::Down => {
                     self.songs_dir
                         .next(ctx.config.scrolloff, ctx.config.wrap_navigation);
@@ -1006,32 +1012,7 @@ impl SearchPane {
                     .items(false)
                     .map(|(_, item)| item.file.clone())
                     .collect();
-                section.add_item("Add to playlist", move |ctx| {
-                    let playlists = ctx.query_sync(move |client| {
-                        Ok(client
-                            .list_playlists()?
-                            .into_iter()
-                            .map(|p| p.name)
-                            .collect_vec())
-                    })?;
-                    modal!(
-                        ctx,
-                        SelectModal::builder()
-                            .ctx(ctx)
-                            .options(playlists)
-                            .confirm_label("Add")
-                            .title("Select a playlist")
-                            .on_confirm(move |ctx, selected, _idx| {
-                                ctx.command(move |client| {
-                                    client.add_to_playlist_multiple(&selected, song_files)?;
-                                    Ok(())
-                                });
-                                Ok(())
-                            })
-                            .build()
-                    );
-                    Ok(())
-                });
+                add_song_save_actions(&mut section, ctx, move |_: &mut Client<'_>| Ok(song_files));
                 Some(section)
             })
             .list_section(ctx, |mut section| {

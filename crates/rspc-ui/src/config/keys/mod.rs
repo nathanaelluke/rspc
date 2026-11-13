@@ -55,13 +55,14 @@ impl Default for KeyConfigFile {
     fn default() -> Self {
         use GlobalActionFile as G;
         use CommonActionFile as C;
+        use super::sort_mode::SongSortKey as Sort;
         #[cfg(debug_assertions)]
         use LogsActionsFile as L;
         use QueueActionsFile as Q;
 
         let s = || KeySequence::new();
 
-        let global = HashMap::from([
+        let mut global = HashMap::from([
             (s().char('q'),                       G::Quit),
             (s().char('?'),                       G::ShowHelp),
             (s().char(':'),                       G::CommandMode),
@@ -75,7 +76,7 @@ impl Default for KeyConfigFile {
             (s().char('c'),                       G::ToggleConsume),
             (s().char('v'),                       G::ToggleSingle),
             (s().char('p'),                       G::TogglePause),
-            (s().char('s'),                       G::Stop),
+            (s().char('S'),                       G::Stop),
             (s().char('>'),                       G::NextTrack),
             (s().char('<'),                       G::PreviousTrack),
             (s().char('f'),                       G::SeekForward),
@@ -86,19 +87,23 @@ impl Default for KeyConfigFile {
             (s().char('g').char('t'),             G::NextTab),
             (s().tab().shift(),                   G::PreviousTab),
             (s().char('g').char('T'),             G::PreviousTab),
-            (s().char('1'),                       G::SwitchToTab("Queue".to_string())),
-            (s().char('2'),                       G::SwitchToTab("Directories".to_string())),
-            (s().char('3'),                       G::SwitchToTab("Artists".to_string())),
-            (s().char('4'),                       G::SwitchToTab("Album Artists".to_string())),
-            (s().char('5'),                       G::SwitchToTab("Albums".to_string())),
-            (s().char('6'),                       G::SwitchToTab("Playlists".to_string())),
-            (s().char('7'),                       G::SwitchToTab("Search".to_string())),
             (s().char('u').ctrl(),                G::Update),
             (s().char('U').ctrl(),                G::Rescan),
             (s().char('R'),                       G::AddRandom),
         ]);
 
+        for (index, key) in "1234567890".chars().enumerate() {
+            global.insert(s().char(key), G::SwitchToTabIndex((index + 1).try_into().expect("nonzero tab position")));
+        }
+
         let navigation = HashMap::from([
+            (s().char('s').char('r'),              C::Sort { by: Sort::Recent }),
+            (s().char('s').char('t'),              C::Sort { by: Sort::Title }),
+            (s().char('s').char('a'),              C::Sort { by: Sort::Artist }),
+            (s().char('s').char('A'),              C::Sort { by: Sort::Album }),
+            (s().char('s').char('d'),              C::Sort { by: Sort::Duration }),
+            (s().char('s').char('o'),              C::Sort { by: Sort::Original }),
+            (s().char('s').char('s'),              C::ReverseSort),
             (s().esc(),                           C::Close),
             (s().char('c').ctrl(),                C::Close),
             (s().cr(),                            C::Confirm),
@@ -156,7 +161,7 @@ impl Default for KeyConfigFile {
         #[cfg(debug_assertions)]
         let logs = HashMap::from([
             (s().char('D'),                       L::Clear),
-            (s().char('S'),                       L::ToggleScroll),
+            (s().char('T'),                       L::ToggleScroll),
         ]);
 
         #[cfg(not(debug_assertions))]

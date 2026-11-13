@@ -1,13 +1,14 @@
 //! Saved collections. Each account and collection has its own refresh lock.
 use super::super::{
     client::Client,
-    protocol::collection::CollectionItem,
+    protocol::collection::{CollectionItem, WriteRequest},
     request::{self, Window, parameter},
 };
 use super::{
     entities,
     records::{self, Page, Release, Song},
 };
+use anyhow::Context;
 use librespot_metadata::{Album, Track};
 use serde_json::{Value, json};
 use std::{
@@ -18,20 +19,65 @@ use std::{
 use tokio::sync::Mutex;
 
 type Snapshot = (Instant, Arc<Vec<CollectionItem>>);
+type CollectionSet = Arc<Mutex<Option<Snapshot>>>;
 #[derive(Default)]
 pub struct CollectionCache {
-    sets: Mutex<HashMap<&'static str, Arc<Mutex<Option<Snapshot>>>>>,
+    sets: Mutex<HashMap<&'static str, CollectionSet>>,
+    writes: Mutex<()>,
+}
+
+impl CollectionCache {
+    async fn gate(&self, name: &'static str) -> CollectionSet {
+        self.sets.lock().await.entry(name).or_default().clone()
+    }
+}
+
+pub async fn add_tracks(client: &Client, uris: &[String]) -> anyhow::Result<usize> {
+    let mut unique = HashSet::new();
+    for uri in uris {
+        let id = uri
+            .strip_prefix("spotify:track:")
+            .ok_or_else(|| anyhow::anyhow!("Liked Songs accepts Spotify tracks only"))?;
+        librespot_core::SpotifyId::from_base62(id).context("Invalid Spotify track ID")?;
+        unique.insert(uri.as_str());
+    }
+    anyhow::ensure!(!unique.is_empty(), "No songs selected");
+
+    let _write = client.collections.writes.lock().await;
+    let existing = load(client, "collection").await?;
+    for entry in existing.iter() {
+        unique.remove(entry.uri.as_str());
+    }
+    if unique.is_empty() {
+        return Ok(0);
+    }
+    let added_at = chrono::Utc::now().timestamp().try_into()?;
+    let items = uris
+        .iter()
+        .filter(|uri| unique.remove(uri.as_str()))
+        .map(|uri| CollectionItem {
+            uri: uri.clone(),
+            added_at,
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    let count = items.len();
+    client
+        .collection_write(&WriteRequest {
+            username: client.username(),
+            set: "collection".into(),
+            items,
+            client_update_id: uuid::Uuid::new_v4().to_string(),
+            ..Default::default()
+        })
+        .await
+        .map_err(request::upstream)?;
+    *client.collections.gate("collection").await.lock().await = None;
+    Ok(count)
 }
 
 async fn load(client: &Client, name: &'static str) -> anyhow::Result<Arc<Vec<CollectionItem>>> {
-    let gate = client
-        .collections
-        .sets
-        .lock()
-        .await
-        .entry(name)
-        .or_default()
-        .clone();
+    let gate = client.collections.gate(name).await;
     let mut slot = gate.lock().await;
     if let Some((_, entries)) = slot
         .as_ref()

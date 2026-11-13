@@ -18,7 +18,7 @@ use crate::{
         UiEvent,
         browser::BrowserPane,
         dir_or_song::DirOrSong,
-        dirstack::DirStack,
+        dirstack::{DirStack, DirStackItem},
         input::InputResultEvent,
         widgets::browser::{Browser, BrowserArea},
     },
@@ -30,6 +30,8 @@ pub struct DirectoriesPane {
     browser: Browser<DirOrSong>,
     initialized: bool,
     rspc: bool,
+    root: Option<&'static str>,
+    target: PaneType,
 }
 
 const INIT: &str = "init";
@@ -42,7 +44,38 @@ impl DirectoriesPane {
             browser: Browser::new(),
             initialized: false,
             rspc: ctx.supported_commands.contains("rspc_identity"),
+            root: None,
+            target: PaneType::Directories,
         }
+    }
+
+    pub fn liked_songs(ctx: &Ctx) -> Self {
+        Self {
+            root: Some("Liked Songs"),
+            target: PaneType::LikedSongs,
+            ..Self::new(ctx)
+        }
+    }
+
+    fn request_root(&self, ctx: &Ctx) {
+        let sort = ctx.config.directories_sort.clone();
+        let playlist_display_mode = ctx.config.show_playlists_in_browser;
+        let root = self.root;
+        ctx.query()
+            .id(INIT)
+            .replace_id(INIT)
+            .target(self.target.clone())
+            .query(move |client| {
+                let mut data = client
+                    .lsinfo(root)?
+                    .into_iter()
+                    .filter_map(|value| value.into_dir_or_song(playlist_display_mode))
+                    .collect::<Vec<_>>();
+                if root.is_none() {
+                    data.sort_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)));
+                }
+                Ok(MpdQueryResult::DirOrSong { data, path: None })
+            });
     }
 
     fn request_path(&self, full_path: &str, next_path: &str) -> String {
@@ -56,6 +89,7 @@ impl DirectoriesPane {
 
 impl Pane for DirectoriesPane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> anyhow::Result<()> {
+        self.restore_sort(ctx);
         self.browser
             .render(area, frame.buffer_mut(), &mut self.stack, ctx);
 
@@ -65,24 +99,7 @@ impl Pane for DirectoriesPane {
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
         if !self.initialized {
             self.rspc = ctx.supported_commands.contains("rspc_identity");
-            let sort = ctx.config.directories_sort.clone();
-            let playlist_display_mode = ctx.config.show_playlists_in_browser;
-            ctx.query()
-                .id(INIT)
-                .replace_id(INIT)
-                .target(PaneType::Directories)
-                .query(move |client| {
-                    let result = client
-                        .lsinfo(None)?
-                        .into_iter()
-                        .filter_map(|v| v.into_dir_or_song(playlist_display_mode))
-                        .sorted_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)))
-                        .collect::<Vec<_>>();
-                    Ok(MpdQueryResult::DirOrSong {
-                        data: result,
-                        path: None,
-                    })
-                });
+            self.request_root(ctx);
             self.initialized = true;
         }
 
@@ -92,26 +109,7 @@ impl Pane for DirectoriesPane {
     fn on_event(&mut self, event: &mut UiEvent, _is_visible: bool, ctx: &Ctx) -> Result<()> {
         match event {
             UiEvent::Database => {
-                let sort = ctx.config.directories_sort.clone();
-                let playlist_display_mode = ctx.config.show_playlists_in_browser;
-                ctx.query()
-                    .id(INIT)
-                    .replace_id(INIT)
-                    .target(PaneType::Directories)
-                    .query(move |client| {
-                        let result = client
-                            .lsinfo(None)?
-                            .into_iter()
-                            .filter_map(|v| v.into_dir_or_song(playlist_display_mode))
-                            .sorted_by(|a, b| {
-                                a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort))
-                            })
-                            .collect::<Vec<_>>();
-                        Ok(MpdQueryResult::DirOrSong {
-                            data: result,
-                            path: None,
-                        })
-                    });
+                self.request_root(ctx);
             }
             UiEvent::Reconnected => {
                 self.initialized = false;
@@ -162,11 +160,30 @@ impl Pane for DirectoriesPane {
             }
             _ => {}
         }
+        self.restore_sort(ctx);
         Ok(())
     }
 }
 
 impl BrowserPane<DirOrSong> for DirectoriesPane {
+    fn sort_context(&self) -> Option<String> {
+        if self.root.is_some() {
+            return Some("library:liked".into());
+        }
+        match self.stack.path().as_slice() {
+            [root, playlist] if root == "Playlists" => Some(format!("playlist:{playlist}")),
+            [root] if root == "Liked Songs" => Some("library:liked".into()),
+            _ => None,
+        }
+    }
+    fn preview_sort_context(&self) -> Option<String> {
+        let selected = self.stack.current().selected()?;
+        match self.stack.path().as_slice() {
+            [root] if root == "Playlists" => Some(format!("playlist:{}", selected.as_path())),
+            [] if selected.as_path() == "Liked Songs" => Some("library:liked".into()),
+            _ => None,
+        }
+    }
     fn stack(&self) -> &DirStack<DirOrSong, ListState> {
         &self.stack
     }
@@ -265,7 +282,7 @@ impl BrowserPane<DirOrSong> for DirectoriesPane {
                 ctx.query()
                     .id(FETCH_DATA)
                     .replace_id("directories_data")
-                    .target(PaneType::Directories)
+                    .target(self.target.clone())
                     .query(move |client| {
                         let data: Vec<_> = if is_playlist {
                             client

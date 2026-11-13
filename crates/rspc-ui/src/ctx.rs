@@ -75,6 +75,7 @@ pub struct Ctx {
     pub(crate) key_resolver: KeyResolver,
     pub(crate) ytdlp_manager: YtDlpManager,
     pub(crate) cached_queue_time_total: Duration,
+    pub(crate) collection_sorts: RefCell<crate::shared::collection_sort::CollectionSorts>,
 }
 
 #[bon]
@@ -115,6 +116,8 @@ impl Ctx {
             .context("Expected at least one tab")?
             .clone();
         scheduler.start();
+        let collection_sorts =
+            crate::shared::collection_sort::CollectionSorts::load(format!("{:?}", config.address));
         Ok(Self {
             ytdlp_manager: YtDlpManager::new(work_sender.clone()),
             mpd_version: client.version(),
@@ -140,6 +143,7 @@ impl Ctx {
             input: InputManager::default(),
             key_resolver,
             cached_queue_time_total,
+            collection_sorts: RefCell::new(collection_sorts),
         })
     }
 
