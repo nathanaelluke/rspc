@@ -8,39 +8,17 @@ one queue.
 
 ## install
 
-Supports Linux x86-64, Linux AArch64 and Apple Silicon macOS 13 or newer. Native
-Windows and Spotify playback on Intel Macs are not supported.
+Linux (x86-64/AArch64) and Apple Silicon macOS 13+.
 
-Both packages below also install Spotify's Soloist player:
+| package manager | command                                               |
+| --------------- | ----------------------------------------------------- |
+| Homebrew        | `brew install --cask nathanaelluke/tap/rspc`             |
+| Nix             | `nix profile add github:nathanaelluke/rspc#rspc`        |
 
-| package manager      | command                                         |
-| -------------------- | ----------------------------------------------- |
-| Homebrew             | `brew install --cask nathanaelluke/tap/rspc`    |
-| Nix, from a checkout | `nix profile add .#rspc --max-jobs 1 --cores 1` |
-
-[GitHub Releases](https://github.com/nathanaelluke/rspc/releases) provide
-binaries and `SHA256SUMS`. Verify your download, then copy both executables from
-`bin/` to a directory on PATH and the contents of `share/` to `~/.local/share/`.
-Linux binaries require OpenSSL 3 and glibc 2.35 on x86-64 or 2.39 on AArch64. On
-macOS, install OpenSSL with `brew install openssl@3`. On NixOS, use the Nix
-package.
-
-To build from source, install stable Rust, a C compiler, `pkg-config` and
-OpenSSL development headers, or enter `nix develop` after cloning:
-
-```sh
-git clone https://github.com/nathanaelluke/rspc.git
-cd rspc
-cargo build --release --locked -j1 -p rspc -p rspc-ui
-./scripts/install.sh
-```
-
-The installer puts both executables in `~/.local/bin`. Source and archive
-installs need Soloist separately: use `brew install --cask spotify-soloist`,
-`nix profile add .#soloist`, or
-[Spotify's downloads](https://developer.spotify.com/documentation/soloist/reference/downloads-and-updates).
-Put it on PATH or set `RSPC_SOLOIST_PATH`. rspc starts the player itself. Linux
-playback needs PipeWire or PulseAudio.
+Both include Spotify's Soloist player. [Prebuilt binaries](https://github.com/nathanaelluke/rspc/releases)
+are also available; manual installs require OpenSSL 3 and
+[Soloist](https://developer.spotify.com/documentation/soloist/reference/downloads-and-updates)
+separately.
 
 ## spotify setup
 
@@ -87,8 +65,9 @@ private, and inspect logs for paths and library metadata before sharing.
 
 ## development
 
-Use `nix develop` for build dependencies and MPD, then `make check` for tests,
-formatting and Clippy. Live Spotify tests require `--ignored` and a saved login.
+From a checkout, use `nix develop` for build dependencies, `make build install`
+to build and install, and `make check` for tests, formatting and Clippy. Live
+Spotify tests require `--ignored` and a saved login.
 
 Release tools live in `crates/xtask`: `check-release --history` scans for
 private data, `licenses` refreshes the third-party notices after dependency
