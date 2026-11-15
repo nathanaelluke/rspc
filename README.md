@@ -16,7 +16,7 @@ Linux (x86-64/AArch64) and Apple Silicon macOS 13+.
 | Nix             | `nix profile add github:nathanaelluke/rspc#rspc`        |
 
 Both include Spotify's Soloist player. [Prebuilt binaries](https://github.com/nathanaelluke/rspc/releases)
-are also available; manual installs require OpenSSL 3 and
+are also available. Manual installs require OpenSSL 3 and
 [Soloist](https://developer.spotify.com/documentation/soloist/reference/downloads-and-updates)
 separately.
 
@@ -32,7 +32,7 @@ rspc
 ```
 
 Follow the authorization shown in the terminal. Use `rspc login --repair` to
-repair an expired or revoked audio session; it interrupts playback. Soloist
+repair an expired or revoked audio session. It interrupts playback. Soloist
 builds expire after 90 days, so keep the player package current.
 
 ## usage
@@ -59,7 +59,7 @@ layouts and keybindings use rmpc 0.11's RON format. See the
 [rmpc documentation](https://rmpc.mierak.dev/configuration/). Use `--config` for
 an existing config. Spotify options live under `spotify`.
 
-Caches live in `~/.cache/rspc`; queue state, pairing and logs in
+Caches live in `~/.cache/rspc`. Queue state, pairing and logs are in
 `~/.local/state/rspc`. XDG overrides are supported. Keep keys and pairing state
 private, and inspect logs for paths and library metadata before sharing.
 
@@ -75,7 +75,7 @@ changes, and `update-soloist --write` refreshes Nix's player checksums. Run them
 with `cargo run --locked -p xtask -- <command>`. Version tags create draft
 releases.
 
-The frontend derives from [rmpc](https://github.com/mierak/rmpc); protocol
+The frontend derives from [rmpc](https://github.com/mierak/rmpc). Protocol
 libraries come from [librespot](https://github.com/librespot-org/librespot). See
 [NOTICE](NOTICE) and the license files for attribution. rspc is not affiliated
 with Spotify or its upstream projects.
