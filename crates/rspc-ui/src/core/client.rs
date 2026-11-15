@@ -408,7 +408,9 @@ mod reconnect_tests {
         let directory = tempfile::tempdir().expect("socket directory");
         let path = directory.path().join("mpd.sock");
         let listener = UnixListener::bind(&path).expect("listen");
+        let (done_tx, done_rx) = bounded(0);
         let server = std::thread::spawn(move || {
+            let mut connections = Vec::new();
             for (version, commands) in [
                 ("0.23.5", "command: getvol\n"),
                 (
@@ -432,7 +434,13 @@ mod reconnect_tests {
                         stream.write_all(b"OK\n").expect("command accepted");
                     }
                 }
+                connections.push(reader);
             }
+            // Keep the peer connected while the client restores socket timeouts.
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("client checks completed");
+            drop(connections);
         });
         let mut client = Client::init(
             MpdAddress::SocketPath(path.to_string_lossy().into_owned()),
@@ -469,6 +477,7 @@ mod reconnect_tests {
             }
             event => panic!("expected refreshed server capabilities, got {event:?}"),
         }
+        done_tx.send(()).expect("release server connections");
         server.join().expect("server completed");
     }
 }
