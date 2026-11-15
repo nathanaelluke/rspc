@@ -195,7 +195,7 @@ impl Default for UiConfigFile {
                 song: "S".to_owned(),
                 dir: "D".to_owned(),
                 playlist: defaults::playlist_symbol(),
-                marker: "M".to_owned(),
+                marker: "M ".to_owned(),
                 ellipsis: Some("...".to_owned()),
                 song_style: None,
                 dir_style: None,

@@ -116,7 +116,10 @@ pub(crate) enum MpdQueryResult {
         playlists: Vec<String>,
         song_files: Vec<String>,
     },
-    AlbumArt(Option<Vec<u8>>),
+    AlbumArt {
+        song: String,
+        data: Option<Vec<u8>>,
+    },
     Status {
         data: Status,
         source_event: Option<IdleEvent>,

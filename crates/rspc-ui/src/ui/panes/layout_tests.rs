@@ -11,7 +11,7 @@ use crate::{
     },
     ctx::Ctx,
     mpd::commands::Song,
-    tests::fixtures::ctx,
+    tests::fixtures::{client_request_channel, ctx},
 };
 
 #[rstest]
@@ -77,6 +77,51 @@ fn load_default_theme(ctx: &mut Ctx) {
         ron::from_str(include_str!("../../../../../config/themes/default.ron"))
             .expect("default theme");
     Arc::make_mut(&mut ctx.config).theme = theme.try_into().expect("convert default theme");
+}
+
+#[rstest]
+fn opening_search_prepares_library_tabs_and_the_hidden_queue_cover(
+    mut ctx: Ctx,
+    client_request_channel: (
+        crossbeam::channel::Sender<crate::shared::events::ClientRequest>,
+        crossbeam::channel::Receiver<crate::shared::events::ClientRequest>,
+    ),
+) {
+    use crate::{config::album_art::ImageMethod, shared::events::ClientRequest, ui::Ui};
+
+    ctx.client_request_sender = client_request_channel.0;
+    ctx.active_tab = "Search".into();
+    Arc::make_mut(&mut ctx.config).album_art.method = ImageMethod::Block;
+    ctx.queue.push(Song {
+        id: 1,
+        file: "current.flac".into(),
+        ..Song::default()
+    });
+    ctx.status.songid = Some(1);
+    ctx.status.state = crate::mpd::commands::State::Play;
+    let mut ui = Ui::new(&ctx).expect("UI");
+    ui.before_show(Rect::new(0, 0, 120, 35), &mut ctx)
+        .expect("prepare UI");
+    let targets = client_request_channel
+        .1
+        .try_iter()
+        .filter_map(|request| match request {
+            ClientRequest::Query(query) => query.target,
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        targets,
+        std::collections::HashSet::from([
+            PaneType::AlbumArt,
+            PaneType::Directories,
+            PaneType::Artists,
+            PaneType::LikedSongs,
+            PaneType::Albums,
+            PaneType::Playlists,
+        ])
+    );
+    assert_eq!(ctx.active_tab.0.as_str(), "Search");
 }
 
 fn render_bars(ctx: &Ctx, width: u16) -> (Vec<Rect>, [String; 2]) {
@@ -238,12 +283,16 @@ fn auto_size_rejects_non_property_panes_and_vertical_splits() {
 }
 
 #[rstest]
-#[case(50, false)]
-#[case(80, true)]
-#[case(120, false)]
-fn queue_headings_and_rows_share_gutters_and_edges(
+#[case(50, false, false)]
+#[case(50, false, true)]
+#[case(80, true, false)]
+#[case(80, true, true)]
+#[case(120, false, false)]
+#[case(120, false, true)]
+fn marking_queue_rows_keeps_the_other_columns_aligned(
     #[case] width: u16,
     #[case] scrollbar: bool,
+    #[case] marked: bool,
     mut ctx: Ctx,
 ) {
     let file: UiConfigFile = ron::from_str(
@@ -278,6 +327,12 @@ fn queue_headings_and_rows_share_gutters_and_edges(
     }];
     let mut header = QueueHeaderPane::new(&ctx);
     let mut queue = QueuePane::new(&ctx);
+    if marked {
+        let mut action = Arc::new(vec![crate::config::keys::CommonAction::Select.into()]).into();
+        queue
+            .handle_action(&mut action, &mut ctx)
+            .expect("mark song");
+    }
     let mut terminal = Terminal::new(TestBackend::new(width, 4)).expect("test terminal");
     terminal
         .draw(|frame| {
@@ -297,7 +352,12 @@ fn queue_headings_and_rows_share_gutters_and_edges(
     };
     let heading = row(0);
     let song = row(1);
-    assert!(song.starts_with('A'), "{song:?}");
+    assert!(
+        song.starts_with(if marked { "M A" } else { "A" }),
+        "{song:?}"
+    );
+    assert_eq!(heading.find("Artist"), Some(0));
+    assert_eq!(song.find('A'), Some(if marked { 2 } else { 0 }));
     for (label, symbol) in [("Title", 'T'), ("Album", 'B')] {
         let start = song.find(symbol).expect("song column");
         assert_eq!(heading.find(label), Some(start), "{heading:?}\n{song:?}");

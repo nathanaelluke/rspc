@@ -53,6 +53,10 @@ impl AlbumsPane {
 }
 
 impl Pane for AlbumsPane {
+    fn prefetch(&mut self, _area: Rect, ctx: &Ctx) -> Result<()> {
+        self.before_show(ctx)
+    }
+
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
         self.restore_sort(ctx);
         self.browser

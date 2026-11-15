@@ -16,6 +16,7 @@ use super::{
     commands::{
         IdleEvent, ListFiles, LsInfo, Mounts, Playlist, Song, Status, Update, Volume,
         decoders::Decoders,
+        library::LibraryItem,
         list::MpdList,
         list_playlist::FileList,
         mpd_config::MpdConfig,
@@ -216,7 +217,25 @@ pub trait MpdCommand {
 
 #[allow(dead_code)]
 pub trait MpdClient: Sized {
+    fn library_items(&mut self, _kind: &str, _value: &str) -> MpdResult<Vec<LibraryItem>> {
+        Err(MpdError::Generic(
+            "Spotify library actions are not supported by this server".into(),
+        ))
+    }
+
+    fn update_saved_item(&mut self, _uri: &str, _remove: bool) -> MpdResult<usize> {
+        Err(MpdError::Generic(
+            "Spotify library actions are not supported by this server".into(),
+        ))
+    }
+
     fn add_liked_tracks(&mut self, _uris: &[String]) -> MpdResult<usize> {
+        Err(MpdError::Generic(
+            "Liked Songs is not supported by this server".into(),
+        ))
+    }
+
+    fn remove_liked_tracks(&mut self, _uris: &[String]) -> MpdResult<usize> {
         Err(MpdError::Generic(
             "Liked Songs is not supported by this server".into(),
         ))
@@ -401,13 +420,23 @@ pub trait MpdClient: Sized {
     fn string_normalization_clear(&mut self) -> MpdResult<()>;
 }
 
-impl MpdClient for Client<'_> {
-    fn add_liked_tracks(&mut self, uris: &[String]) -> MpdResult<usize> {
+impl Client<'_> {
+    fn update_liked_tracks(&mut self, uris: &[String], remove: bool) -> MpdResult<usize> {
+        if uris.iter().any(|uri| !uri.starts_with("spotify:track:")) {
+            return Err(MpdError::Generic(
+                "Liked Songs accepts Spotify tracks only".into(),
+            ));
+        }
         self.with_catalog_timeout(|client| {
+            let command = if remove {
+                "rspc_library_remove"
+            } else {
+                "rspc_library_add"
+            };
             let mut total = 0;
             for chunk in uris.chunks(1000) {
                 let args = chunk.iter().map(|uri| uri.quote_and_escape()).join(" ");
-                client.execute(&format!("rspc_library_add {args}"))?;
+                client.execute(&format!("{command} {args}"))?;
                 let values: MpdList = client.read_response()?;
                 let added = values
                     .0
@@ -419,6 +448,52 @@ impl MpdClient for Client<'_> {
             }
             Ok(total)
         })
+    }
+}
+
+impl MpdClient for Client<'_> {
+    fn library_items(&mut self, kind: &str, value: &str) -> MpdResult<Vec<LibraryItem>> {
+        self.with_catalog_timeout(|client| {
+            client.execute(&format!(
+                "rspc_library_items {} {}",
+                kind.quote_and_escape(),
+                value.quote_and_escape()
+            ))?;
+            let values: MpdList = client.read_response()?;
+            let value = values
+                .0
+                .first()
+                .ok_or_else(|| MpdError::Parse("missing library items".into()))?;
+            serde_json::from_str(value).map_err(|error| MpdError::Parse(error.to_string()))
+        })
+    }
+
+    fn update_saved_item(&mut self, uri: &str, remove: bool) -> MpdResult<usize> {
+        if !uri.starts_with("spotify:album:") && !uri.starts_with("spotify:artist:") {
+            return Err(MpdError::Generic("Select a Spotify album or artist".into()));
+        }
+        self.with_catalog_timeout(|client| {
+            let action = if remove { "remove" } else { "save" };
+            client.execute(&format!(
+                "rspc_library_update {} {action}",
+                uri.quote_and_escape()
+            ))?;
+            let values: MpdList = client.read_response()?;
+            values
+                .0
+                .first()
+                .ok_or_else(|| MpdError::Parse("missing library update count".into()))?
+                .parse::<usize>()
+                .map_err(|error| MpdError::Parse(error.to_string()))
+        })
+    }
+
+    fn add_liked_tracks(&mut self, uris: &[String]) -> MpdResult<usize> {
+        self.update_liked_tracks(uris, false)
+    }
+
+    fn remove_liked_tracks(&mut self, uris: &[String]) -> MpdResult<usize> {
+        self.update_liked_tracks(uris, true)
     }
 
     fn selection_songs(&mut self, path: &str) -> MpdResult<Vec<Song>> {

@@ -58,6 +58,7 @@ jobs:
           cargo build --release --locked -j2 -p rspc -p rspc-ui
           cargo test --locked -j2 --workspace
           version=$(target/debug/xtask version)
+          test -s "release-notes/v$version.md"
           if [ "$RELEASE_REF_TYPE" = tag ] && [ "$RELEASE_TAG" != "v$version" ]; then
             echo 'Tag and Cargo version differ' >&2
             exit 1
@@ -136,7 +137,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           gh release create "$RELEASE_TAG" dist/* --verify-tag --draft \
-            --title "rspc $RELEASE_TAG" --generate-notes
+            --title "rspc $RELEASE_TAG" --notes-file "release-notes/$RELEASE_TAG.md"
 
   homebrew:
     needs: assemble

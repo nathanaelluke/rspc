@@ -60,6 +60,10 @@ impl PlaylistsPane {
 }
 
 impl Pane for PlaylistsPane {
+    fn prefetch(&mut self, _area: Rect, ctx: &Ctx) -> Result<()> {
+        self.before_show(ctx)
+    }
+
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
         self.restore_sort(ctx);
         self.browser
@@ -378,11 +382,14 @@ impl BrowserPane<DirOrSong> for PlaylistsPane {
             [playlist] => {
                 let playlist: Arc<str> = Arc::from(playlist.as_str());
                 items
+                    // The client deletes from last to first, using backend positions.
+                    .map(|(idx, item)| (self.stack.current().source_index(idx), item))
+                    .sorted_by_key(|(idx, _)| *idx)
                     .filter_map(|(idx, item)| match item {
                         DirOrSong::Dir { .. } => None,
                         DirOrSong::Song(_) => Some(MpdDelete::SongInPlaylist {
                             playlist: Arc::clone(&playlist),
-                            range: SingleOrRange::single(self.stack.current().source_index(idx)),
+                            range: SingleOrRange::single(idx),
                         }),
                     })
                     .collect_vec()

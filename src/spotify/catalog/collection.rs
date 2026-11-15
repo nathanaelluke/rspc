@@ -33,21 +33,69 @@ impl CollectionCache {
 }
 
 pub async fn add_tracks(client: &Client, uris: &[String]) -> anyhow::Result<usize> {
+    update_items(client, uris, CollectionKind::Track, false).await
+}
+
+pub async fn remove_tracks(client: &Client, uris: &[String]) -> anyhow::Result<usize> {
+    update_items(client, uris, CollectionKind::Track, true).await
+}
+
+pub async fn update_saved(client: &Client, uri: &str, remove: bool) -> anyhow::Result<usize> {
+    let kind = if uri.starts_with("spotify:album:") {
+        CollectionKind::Album
+    } else if uri.starts_with("spotify:artist:") {
+        CollectionKind::Artist
+    } else {
+        anyhow::bail!("Select a Spotify album or artist");
+    };
+    update_items(client, &[uri.to_owned()], kind, remove).await
+}
+
+enum CollectionKind {
+    Track,
+    Album,
+    Artist,
+}
+
+impl CollectionKind {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Track => "track",
+            Self::Album => "album",
+            Self::Artist => "artist",
+        }
+    }
+
+    fn set(&self) -> &'static str {
+        match self {
+            Self::Track | Self::Album => "collection",
+            Self::Artist => "artist",
+        }
+    }
+}
+
+async fn update_items(
+    client: &Client,
+    uris: &[String],
+    kind: CollectionKind,
+    remove: bool,
+) -> anyhow::Result<usize> {
+    let prefix = format!("spotify:{}:", kind.name());
     let mut unique = HashSet::new();
     for uri in uris {
         let id = uri
-            .strip_prefix("spotify:track:")
+            .strip_prefix(&prefix)
             .ok_or_else(|| anyhow::anyhow!("Liked Songs accepts Spotify tracks only"))?;
-        librespot_core::SpotifyId::from_base62(id).context("Invalid Spotify track ID")?;
+        librespot_core::SpotifyId::from_base62(id)
+            .with_context(|| format!("Invalid Spotify {} ID", kind.name()))?;
         unique.insert(uri.as_str());
     }
     anyhow::ensure!(!unique.is_empty(), "No songs selected");
 
     let _write = client.collections.writes.lock().await;
-    let existing = load(client, "collection").await?;
-    for entry in existing.iter() {
-        unique.remove(entry.uri.as_str());
-    }
+    let existing = load(client, kind.set()).await?;
+    let known: HashSet<_> = existing.iter().map(|entry| entry.uri.as_str()).collect();
+    unique.retain(|uri| known.contains(uri) == remove);
     if unique.is_empty() {
         return Ok(0);
     }
@@ -58,6 +106,7 @@ pub async fn add_tracks(client: &Client, uris: &[String]) -> anyhow::Result<usiz
         .map(|uri| CollectionItem {
             uri: uri.clone(),
             added_at,
+            is_removed: remove,
             ..Default::default()
         })
         .collect::<Vec<_>>();
@@ -65,14 +114,14 @@ pub async fn add_tracks(client: &Client, uris: &[String]) -> anyhow::Result<usiz
     client
         .collection_write(&WriteRequest {
             username: client.username(),
-            set: "collection".into(),
+            set: kind.set().into(),
             items,
             client_update_id: uuid::Uuid::new_v4().to_string(),
             ..Default::default()
         })
         .await
         .map_err(request::upstream)?;
-    *client.collections.gate("collection").await.lock().await = None;
+    *client.collections.gate(kind.set()).await.lock().await = None;
     Ok(count)
 }
 

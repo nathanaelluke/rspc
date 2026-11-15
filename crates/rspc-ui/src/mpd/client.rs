@@ -395,6 +395,33 @@ mod tests {
     }
 
     #[test]
+    fn unliking_sends_uris_and_validates_every_batch_before_writing() {
+        let (mut client, mut peer) = pair();
+        peer.write_all(b"library_removed: 2\nOK\n").expect("reply");
+        let uris = vec!["spotify:track:first".into(), "spotify:track:second".into()];
+        assert_eq!(client.remove_liked_tracks(&uris).expect("unlike tracks"), 2);
+        let mut command = String::new();
+        BufReader::new(&mut peer)
+            .read_line(&mut command)
+            .expect("read command");
+        assert_eq!(
+            command,
+            "rspc_library_remove \"spotify:track:first\" \"spotify:track:second\"\n"
+        );
+        let mut invalid = vec!["spotify:track:first".into(); 1000];
+        invalid.push("mpd:local.flac".into());
+        assert!(client.remove_liked_tracks(&invalid).is_err());
+        peer.set_nonblocking(true).expect("nonblocking peer");
+        let mut bytes = [0];
+        assert_eq!(
+            std::io::Read::read(&mut peer, &mut bytes)
+                .expect_err("invalid selections must not send a partial batch")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
     fn catalog_deadline_is_restored_after_success_and_failure() {
         let (mut client, _peer) = pair();
         let ordinary = Some(Duration::from_secs(5));

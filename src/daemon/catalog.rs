@@ -3,6 +3,7 @@ mod artist_views;
 mod artwork;
 mod background;
 mod browse;
+mod library;
 mod people;
 mod playlist_views;
 mod playlists;
@@ -117,6 +118,8 @@ pub struct Catalog {
     versions: std::sync::Mutex<HashMap<String, u64>>,
     demo_playlists: Mutex<BTreeMap<String, Vec<TrackInfo>>>,
     demo_liked: Mutex<Vec<TrackInfo>>,
+    demo_saved_albums: Mutex<Vec<Value>>,
+    demo_followed_artists: Mutex<Vec<(String, String)>>,
 }
 impl Catalog {
     pub fn new(demo: bool) -> Self {
@@ -153,6 +156,11 @@ impl Catalog {
             versions: std::sync::Mutex::new(versions),
             demo_playlists: Mutex::new(BTreeMap::from([("Demo Mix".into(), demo_tracks())])),
             demo_liked: Mutex::new(demo_tracks()),
+            demo_saved_albums: Mutex::new(demo_albums()),
+            demo_followed_artists: Mutex::new(vec![(
+                "demo-artist".into(),
+                "The Example Ensemble".into(),
+            )]),
             tracks: Mutex::new(HashMap::new()),
             artwork: Mutex::new(Default::default()),
             albums: Mutex::new(HashMap::new()),
@@ -490,44 +498,6 @@ impl Catalog {
         }
         Ok(self.playlist_view("me/tracks").await?.as_ref().clone())
     }
-    pub async fn add_liked(self: &Arc<Self>, uris: &[String]) -> Result<usize> {
-        ensure!(!uris.is_empty(), "No songs selected");
-        ensure!(
-            uris.iter().all(|uri| uri.starts_with("spotify:track:")),
-            "Liked Songs accepts Spotify tracks only"
-        );
-        let count = if self.demo {
-            let mut tracks = Vec::new();
-            for uri in uris {
-                tracks.extend(self.resolve(uri).await?);
-            }
-            let mut liked = self.demo_liked.lock().await;
-            let mut known: std::collections::HashSet<_> =
-                liked.iter().filter_map(|track| track.uri.clone()).collect();
-            tracks.retain(|track| {
-                track
-                    .uri
-                    .as_ref()
-                    .is_some_and(|uri| known.insert(uri.clone()))
-            });
-            let count = tracks.len();
-            liked.splice(0..0, tracks);
-            count
-        } else {
-            let count = crate::spotify::add_liked_tracks(uris).await?;
-            if count > 0 {
-                self.invalidate_resource("me/tracks").await.context(
-                    "Saved to Liked Songs, but could not refresh the local library cache",
-                )?;
-            }
-            count
-        };
-        if count > 0 {
-            self.tag_cache.lock().await.clear();
-            self.content_revision.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(count)
-    }
     pub async fn recent(self: &Arc<Self>) -> Result<Vec<TrackInfo>> {
         if self.demo {
             return self.liked().await;
@@ -549,7 +519,7 @@ impl Catalog {
     }
     pub async fn saved_albums(self: &Arc<Self>) -> Result<Vec<Value>> {
         if self.demo {
-            return Ok(demo_albums());
+            return Ok(self.demo_saved_albums.lock().await.clone());
         }
         let items = self.pages("me/albums").await?;
         self.set_library_dates(
@@ -576,7 +546,7 @@ impl Catalog {
     }
     pub async fn artists(self: &Arc<Self>) -> Result<Vec<(String, String)>> {
         if self.demo {
-            return Ok(vec![("demo-artist".into(), "The Example Ensemble".into())]);
+            return Ok(self.demo_followed_artists.lock().await.clone());
         }
         let mut result = BTreeMap::new();
         let mut after: Option<String> = None;

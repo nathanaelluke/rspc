@@ -199,8 +199,7 @@ impl Section for SelectSection {
     }
 
     fn double_click(&mut self, _pos: Position, ctx: &Ctx) -> Result<bool> {
-        self.confirm(ctx)?;
-        Ok(false)
+        self.confirm(ctx)
     }
 
     fn item_labels_iter(&self) -> Box<dyn Iterator<Item = &str> + '_> {

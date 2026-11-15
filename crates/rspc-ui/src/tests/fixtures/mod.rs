@@ -90,6 +90,7 @@ pub fn ctx(
         key_resolver,
         cached_queue_time_total: Duration::default(),
         collection_sorts: RefCell::new(crate::shared::collection_sort::CollectionSorts::default()),
+        liked_song_uris: RefCell::new(None),
     }
 }
 

@@ -457,7 +457,8 @@ impl Harness {
             } else {
                 status.success()
             },
-            "TUI exited unsuccessfully: {}",
+            "TUI exited unsuccessfully ({status}, sent {index}/{} steps, quit={quit}): {}",
+            steps.len(),
             screen
         );
         ensure!(

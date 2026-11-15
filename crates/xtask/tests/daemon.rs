@@ -73,7 +73,7 @@ fn curator_browser_and_public_playlists() -> Result<()> {
         );
     }
     let output = h.tui(
-        &[b"2", b"/", b"People", b"\r", b"l", b"l", b"l", b"1"],
+        &[b"6", b"/", b"People", b"\r", b"l", b"l", b"l", b"1"],
         false,
     )?;
     assert!(contains(&output, b"Example Curator") && contains(&output, b"Demo Mix"));
@@ -133,10 +133,351 @@ fn paged_artist_index_and_whole_artist_queue_actions() -> Result<()> {
     h.raw("clear")?;
     h.raw(&format!("add {}", quote(uri)))?;
     assert_eq!(h.raw("playlistinfo")?.matches("file: ").count(), 3);
-    let output = h.tui(&[b"3", b"l", b"l", b"oi", b"\x1b"], false)?;
+    let output = h.tui(&[b"2", b"l", b"l", b"oi", b"\x1b"], false)?;
     assert!(!contains(&output, b"timed out"));
     assert!(contains(&output, b"Morning Light"));
     assert_eq!(h.raw("playlistinfo")?.matches("file: ").count(), 3);
+    Ok(())
+}
+
+#[test]
+fn liked_song_shortcuts_save_the_selection_and_current_song_independently() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor};
+
+    let mut h = Harness::isolated(true)?;
+    let queue = h.path("state/rspc/demo-queue.json");
+    fs::create_dir_all(queue.parent().unwrap())?;
+    fs::write(
+        &queue,
+        serde_json::to_vec(&json!({
+            "entries": [
+                {"id":1,"track":{"uri":"spotify:track:current-fixture","name":"Current fixture","duration_ms":180000}},
+                {"id":2,"track":{"uri":"spotify:track:selected-fixture","name":"Selected fixture","duration_ms":180000}},
+                {"id":3,"track":{"uri":"spotify:track:demo1","name":"Morning Light","duration_ms":180000}}
+            ],
+            "next_id":3,"version":1,"current":null
+        }))?,
+    )?;
+    h.start()?;
+    h.cli(&["play", "0"])?;
+    let before = h.status()?["songid"].clone();
+    h.tui_steps(
+        &[
+            WaitFor(b"Selected fixture"),
+            Key(b"j"),
+            Key(b"\x13l"),
+            Key(b"3"),
+            WaitFor(b"File: spotify:track:selected-fixture"),
+        ],
+        false,
+    )?;
+    let liked = h.raw("listallinfo \"Liked Songs\"")?;
+    assert!(liked.contains("spotify:track:selected-fixture"));
+    assert!(!liked.contains("spotify:track:current-fixture"));
+    h.tui_steps(
+        &[
+            WaitFor(b"Selected fixture"),
+            Key(b"j"),
+            Key(b"2"),
+            WaitFor(b"The Example Ensemble"),
+            Key(b"\x13L"),
+            Key(b"3"),
+            WaitFor(b"File: spotify:track:current-fixture"),
+        ],
+        false,
+    )?;
+    let liked = h.raw("listallinfo \"Liked Songs\"")?;
+    assert!(liked.contains("spotify:track:current-fixture"));
+    assert!(liked.contains("spotify:track:selected-fixture"));
+    assert_eq!(h.status()?["songid"], before);
+    assert!(state_is(&h.status()?, "play"));
+    Ok(())
+}
+
+#[test]
+fn liked_song_menus_follow_membership_and_library_changes_stay_quiet() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor, WaitUntilGone};
+    let h = Harness::demo()?;
+    let liked_menu = h.tui_steps(
+        &[
+            Key(b"\x1a"),
+            WaitFor(b"Remove from Liked Songs"),
+            WaitUntilGone(b"Add to Liked Songs"),
+            Key(b"\x1b"),
+        ],
+        false,
+    )?;
+    assert!(!contains(&liked_menu, b"Add to Liked Songs"));
+    h.raw("rspc_library_remove spotify:track:demo1")?;
+    let mixed_menu = h.tui_steps(
+        &[
+            Key(b"\x1a"),
+            WaitFor(b"Add to Liked Songs"),
+            WaitUntilGone(b"Remove from Liked Songs"),
+            Key(b"\x1b"),
+            Key(b"mjmj"),
+            Key(b"\x1a"),
+            WaitFor(b"Add to Liked Songs"),
+            WaitFor(b"Remove from Liked Songs"),
+            Key(b"/"),
+            Key(b"Add to Liked Songs"),
+            Key(b"\r"),
+            Key(b"\r"),
+            WaitUntilGone(b"Add to Liked Songs"),
+            WaitFor(b"Added 1 song to Liked Songs"),
+            Key(b"ggmjmj"),
+            Key(b"\x1a"),
+            WaitFor(b"Remove from Liked Songs"),
+            WaitUntilGone(b"Add to Liked Songs"),
+            Key(b"/"),
+            Key(b"Remove from Liked Songs"),
+            Key(b"\r"),
+            Key(b"\r"),
+            WaitFor(b"Remove 2 songs from Spotify Liked Songs?"),
+            Key(b"\r"),
+            WaitUntilGone(b"Remove 2 songs from Spotify Liked Songs?"),
+            WaitFor(b"Removed 2 songs from Liked Songs"),
+        ],
+        false,
+    )?;
+    assert!(!contains(&mixed_menu, b"music database has been updated"));
+    let liked = h.raw("lsinfo \"Liked Songs\"")?;
+    assert_eq!(liked.matches("file: ").count(), 1);
+    assert!(liked.contains("spotify:track:demo3"));
+    assert_eq!(h.raw("playlistinfo")?.matches("file: ").count(), 3);
+    Ok(())
+}
+
+#[test]
+fn local_song_menus_do_not_offer_spotify_library_actions() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor};
+
+    let mut h = Harness::isolated(true)?;
+    let queue = h.path("state/rspc/demo-queue.json");
+    fs::create_dir_all(queue.parent().unwrap())?;
+    fs::write(
+        &queue,
+        serde_json::to_vec(&json!({
+            "entries": [
+                {"id":1,"track":{"uri":"spotify:track:demo1","name":"Morning Light","duration_ms":180000}},
+                {"id":2,"track":{"uri":"mpd:local.flac","name":"Local fixture","duration_ms":180000}}
+            ],
+            "next_id":2,"version":1,"current":null
+        }))?,
+    )?;
+    h.start()?;
+    let output = h.tui_steps(
+        &[
+            WaitFor(b"Local fixture"),
+            Key(b"j\x1a"),
+            WaitFor(b"Add to playlist"),
+            Key(b"\x1b"),
+        ],
+        false,
+    )?;
+    assert!(!contains(&output, b"Add to Liked Songs"));
+    assert!(!contains(&output, b"Remove from Liked Songs"));
+    assert_eq!(
+        h.raw("lsinfo \"Liked Songs\"")?.matches("file: ").count(),
+        3
+    );
+    Ok(())
+}
+
+#[test]
+fn album_and_artist_menus_follow_saved_state_and_confirm_removal() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor, WaitUntilGone};
+
+    let h = Harness::demo()?;
+    let queue = h.raw("playlistinfo")?;
+    let output = h.tui_steps(
+        &[
+            Key(b"\x1a"),
+            WaitFor(b"Remove album: Example Sessions"),
+            WaitFor(b"Unfollow artist: The Example Ensemble"),
+            Key(b"/"),
+            Key(b"Remove album"),
+            Key(b"\r\r"),
+            WaitFor(b"Remove album \"Example Sessions\"?"),
+            Key(b"\x1b"),
+            WaitUntilGone(b"Remove album \"Example Sessions\"?"),
+            Key(b"\x1a"),
+            WaitFor(b"Remove album: Example Sessions"),
+            Key(b"/"),
+            Key(b"Remove album"),
+            Key(b"\r\r"),
+            WaitFor(b"Remove album \"Example Sessions\"?"),
+            Key(b"\r"),
+            WaitFor(b"Removed album: Example Sessions"),
+            Key(b"\x1a"),
+            WaitFor(b"Save album: Example Sessions"),
+            WaitUntilGone(b"Remove album: Example Sessions"),
+            Key(b"/"),
+            Key(b"Save album"),
+            Key(b"\r\r"),
+            WaitFor(b"Saved album: Example Sessions"),
+            Key(b"\x1a"),
+            WaitFor(b"Unfollow artist: The Example Ensemble"),
+            Key(b"/"),
+            Key(b"Unfollow artist"),
+            Key(b"\r\r"),
+            WaitFor(b"Unfollow artist \"The Example Ensemble\"?"),
+            Key(b"\r"),
+            WaitFor(b"Unfollowed artist: The Example Ensemble"),
+            Key(b"\x1a"),
+            WaitFor(b"Follow artist: The Example Ensemble"),
+            WaitUntilGone(b"Unfollow artist: The Example Ensemble"),
+            Key(b"/"),
+            Key(b"Follow artist"),
+            Key(b"\r\r"),
+            WaitFor(b"Following artist: The Example Ensemble"),
+            Key(b"4"),
+            WaitFor(b"Example Sessions"),
+            Key(b"\x1a"),
+            WaitFor(b"Remove album: Example Sessions"),
+            Key(b"\x1b"),
+            Key(b"2"),
+            WaitFor(b"The Example Ensemble"),
+            Key(b"\x1a"),
+            WaitFor(b"Unfollow artist: The Example Ensemble"),
+            Key(b"\x1b"),
+        ],
+        false,
+    )?;
+    assert!(!contains(&output, b"music database has been updated"));
+    assert_eq!(h.raw("playlistinfo")?, queue);
+    assert_eq!(
+        h.raw("lsinfo \"Liked Songs\"")?.matches("file: ").count(),
+        3
+    );
+    Ok(())
+}
+
+#[test]
+fn marking_with_m_keeps_the_cursor_on_the_marked_song() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor, WaitUntilGone};
+
+    let h = Harness::demo()?;
+    for tab in [b"1".as_slice(), b"3".as_slice()] {
+        let output = h.tui_steps(
+            &[
+                Key(tab),
+                WaitFor(b"Morning Light"),
+                Key(b"mm"),
+                Key(b"oi"),
+                WaitFor(b"Song info"),
+                WaitFor(b"spotify:track:demo1"),
+                Key(b"\x1b"),
+                WaitUntilGone(b"Song info"),
+                Key(b"mjm"),
+                Key(b"\x1a"),
+                WaitFor(b"Remove from Liked Songs"),
+                Key(b"/"),
+                Key(b"Remove from Liked Songs"),
+                Key(b"\r\r"),
+                WaitFor(b"Remove 2 songs from Spotify Liked Songs?"),
+                Key(b"\x1b"),
+            ],
+            false,
+        )?;
+        assert!(contains(&output, b"M "));
+    }
+    assert_eq!(
+        h.raw("lsinfo \"Liked Songs\"")?.matches("file: ").count(),
+        3
+    );
+    Ok(())
+}
+
+#[test]
+fn liked_songs_removal_supports_confirmation_marks_sorting_and_context_menus() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor, WaitUntilGone};
+    let h = Harness::demo()?;
+    h.cli(&["play", "0"])?;
+    let queue = h.raw("playlistinfo")?;
+    let playlist = h.raw("listplaylistinfo \"Demo Mix\"")?;
+    h.tui_steps(
+        &[
+            Key(b"3"),
+            WaitFor(b"File: spotify:track:demo1"),
+            Key(b"sr"),
+            Key(b"gg"),
+            Key(b"mjmj"),
+            Key(b"D"),
+            WaitFor(b"Remove 2 songs from Spotify Liked Songs?"),
+            Key(b"\x1b"),
+            WaitUntilGone(b"Remove 2 songs from Spotify Liked Songs?"),
+        ],
+        false,
+    )?;
+    assert_eq!(
+        h.raw("lsinfo \"Liked Songs\"")?.matches("file: ").count(),
+        3
+    );
+    h.tui_steps(
+        &[
+            Key(b"3"),
+            WaitFor(b"File: spotify:track:demo3"),
+            Key(b"mjmj"),
+            Key(b"D"),
+            WaitFor(b"Remove 2 songs from Spotify Liked Songs?"),
+            Key(b"\r"),
+            WaitUntilGone(b"Remove 2 songs from Spotify Liked Songs?"),
+            WaitFor(b"File: spotify:track:demo1"),
+        ],
+        false,
+    )?;
+    let liked = h.raw("lsinfo \"Liked Songs\"")?;
+    assert_eq!(liked.matches("file: ").count(), 1);
+    assert!(liked.contains("spotify:track:demo1"));
+    h.tui_steps(
+        &[
+            Key(b"\x1a"),
+            WaitFor(b"Remove from Liked Songs"),
+            Key(b"/"),
+            Key(b"Remove from Liked Songs"),
+            Key(b"\r"),
+            Key(b"\r"),
+            WaitFor(b"Remove 1 song from Spotify Liked Songs?"),
+            Key(b"\r"),
+            WaitUntilGone(b"Remove 1 song from Spotify Liked Songs?"),
+        ],
+        false,
+    )?;
+    assert!(!h.raw("lsinfo \"Liked Songs\"")?.contains("file: "));
+    assert_eq!(h.raw("playlistinfo")?, queue);
+    assert_eq!(h.raw("listplaylistinfo \"Demo Mix\"")?, playlist);
+    assert!(state_is(&h.status()?, "play"));
+    Ok(())
+}
+
+#[test]
+fn removing_a_like_from_directories_keeps_the_liked_songs_page_open() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor, WaitUntilGone};
+    let h = Harness::demo()?;
+    h.cli(&["play", "0"])?;
+    h.tui_steps(
+        &[
+            Key(b"6"),
+            WaitFor(b"Liked Songs"),
+            Key(b"/"),
+            Key(b"Liked Songs"),
+            Key(b"\r"),
+            Key(b"l"),
+            WaitFor(b"File: spotify:track:demo1"),
+            Key(b"D"),
+            WaitFor(b"Remove 1 song from Spotify Liked Songs?"),
+            Key(b"\r"),
+            WaitUntilGone(b"Remove 1 song from Spotify Liked Songs?"),
+            WaitFor(b"File: spotify:track:demo2"),
+        ],
+        false,
+    )?;
+    assert_eq!(
+        h.raw("lsinfo \"Liked Songs\"")?.matches("file: ").count(),
+        2
+    );
+    assert!(state_is(&h.status()?, "play"));
     Ok(())
 }
 
@@ -146,25 +487,30 @@ fn selection_info_on_every_library_page() -> Result<()> {
 
     let h = Harness::demo()?;
     let pages: &[(&[u8], &[u8])] = &[
-        (b"2", b"Liked Songs"),
-        (b"3", b"The Example Ensemble"),
-        (b"4", b"The Example Ensemble"),
-        (b"5", b"Example Sessions"),
-        (b"6", b"Demo Mix"),
+        (b"6", b"Liked Songs"),
+        (b"2", b"The Example Ensemble"),
+        (b"3", b"Morning Light"),
+        (b"4", b"Example Sessions"),
+        (b"5", b"Demo Mix"),
     ];
     for &(tab, ready) in pages {
         let mut steps = vec![Key(tab), WaitFor(ready)];
-        if tab == b"2" {
+        if tab == b"6" {
             steps.extend([Key(b"/"), Key(b"Liked Songs"), Key(b"\r")]);
         }
+        let title = if tab == b"3" {
+            b"Song info".as_slice()
+        } else {
+            b"Selection info".as_slice()
+        };
         steps.extend([
             Key(b"oi"),
-            WaitFor(b"Selection info"),
+            WaitFor(title),
             Key(b"\x1b"),
-            WaitUntilGone(b"Selection info"),
+            WaitUntilGone(title),
         ]);
         let output = h.tui_steps(&steps, false)?;
-        assert!(contains(&output, b"Selection info"));
+        assert!(contains(&output, title));
         assert!(!contains(&output, b"timed out"));
     }
     for (kind, value, field) in [

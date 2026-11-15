@@ -72,8 +72,178 @@ async fn liking_tracks_preserves_existing_addition_dates_and_refreshes_membershi
 }
 
 #[tokio::test]
-async fn liking_rejects_local_files_and_bad_ids_before_requesting_the_library() {
+async fn unliking_tracks_sends_tombstones_and_preserves_other_likes() {
+    use crate::spotify::protocol::collection::{CollectionItem, PageResponse, WriteRequest};
+    let removed = uri("track", 1);
+    let kept = uri("track", 2);
+    let entry = |uri: String, is_removed| CollectionItem {
+        uri,
+        added_at: 1,
+        is_removed,
+        ..Default::default()
+    };
+    let (client, task) = server(vec![
+        (
+            200,
+            PageResponse {
+                items: vec![entry(removed.clone(), false), entry(kept.clone(), false)],
+                ..Default::default()
+            }
+            .write_to_bytes()
+            .unwrap(),
+        ),
+        (200, Vec::new()),
+        (
+            200,
+            PageResponse {
+                items: vec![entry(removed.clone(), true), entry(kept.clone(), false)],
+                ..Default::default()
+            }
+            .write_to_bytes()
+            .unwrap(),
+        ),
+    ])
+    .await;
+    assert_eq!(
+        collection::remove_tracks(
+            &client,
+            &[removed.clone(), removed.clone(), uri("track", 3)]
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        collection::remove_tracks(&client, std::slice::from_ref(&removed))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(collection::add_tracks(&client, &[kept]).await.unwrap(), 0);
+    let requests = task.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].path.starts_with("POST /collection/v2/write "));
+    let write = WriteRequest::parse_from_bytes(&requests[1].body).unwrap();
+    assert_eq!(write.set, "collection");
+    assert_eq!(write.items.len(), 1);
+    assert_eq!(write.items[0].uri, removed);
+    assert!(write.items[0].is_removed);
+    assert!(write.items[0].added_at > 1);
+}
+
+#[tokio::test]
+async fn albums_and_artists_use_their_own_collection_and_support_removal() {
+    use crate::spotify::protocol::collection::{
+        CollectionItem, PageRequest, PageResponse, WriteRequest,
+    };
+    for (kind, set) in [("album", "collection"), ("artist", "artist")] {
+        let target = uri(kind, 1);
+        let unrelated = uri("track", 2);
+        let entry = |uri: String, is_removed| CollectionItem {
+            uri,
+            is_removed,
+            added_at: 1,
+            ..Default::default()
+        };
+        let page = |removed: Option<bool>| {
+            PageResponse {
+                items: std::iter::once(entry(unrelated.clone(), false))
+                    .chain(removed.map(|removed| entry(target.clone(), removed)))
+                    .collect(),
+                ..Default::default()
+            }
+            .write_to_bytes()
+            .unwrap()
+        };
+        let (client, task) = server(vec![
+            (200, page(None)),
+            (200, Vec::new()),
+            (200, page(Some(false))),
+            (200, Vec::new()),
+            (200, page(Some(true))),
+        ])
+        .await;
+        assert_eq!(
+            collection::update_saved(&client, &target, false)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            collection::update_saved(&client, &target, false)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            collection::update_saved(&client, &target, true)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            collection::update_saved(&client, &target, true)
+                .await
+                .unwrap(),
+            0
+        );
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 5);
+        for index in [0, 2, 4] {
+            assert_eq!(
+                PageRequest::parse_from_bytes(&requests[index].body)
+                    .unwrap()
+                    .set,
+                set
+            );
+        }
+        for (index, remove) in [(1, false), (3, true)] {
+            let write = WriteRequest::parse_from_bytes(&requests[index].body).unwrap();
+            assert_eq!(write.set, set);
+            assert_eq!(write.items.len(), 1);
+            assert_eq!(write.items[0].uri, target);
+            assert_eq!(write.items[0].is_removed, remove);
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_album_and_artist_writes_are_not_retried() {
+    use crate::spotify::protocol::collection::PageResponse;
+    for kind in ["album", "artist"] {
+        let (client, task) = server(vec![
+            (200, PageResponse::default().write_to_bytes().unwrap()),
+            (503, b"temporarily unavailable".to_vec()),
+            (200, Vec::new()),
+        ])
+        .await;
+        let target = uri(kind, 1);
+        assert!(
+            collection::update_saved(&client, &target, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            collection::update_saved(&client, &target, false)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(task.await.unwrap().len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn library_writes_reject_local_files_and_bad_ids_before_requesting_the_library() {
     let client = Client::fixture("http://127.0.0.1:1".into());
+    for uri in [
+        "mpd:file.flac",
+        "spotify:album:invalid",
+        "spotify:artist:invalid",
+    ] {
+        assert!(collection::update_saved(&client, uri, false).await.is_err());
+        assert!(collection::update_saved(&client, uri, true).await.is_err());
+    }
     for (uris, expected) in [
         (
             vec!["mpd:file.flac".into()],
@@ -85,8 +255,15 @@ async fn liking_rejects_local_files_and_bad_ids_before_requesting_the_library() 
         ),
         (Vec::new(), "No songs selected"),
     ] {
-        let error = collection::add_tracks(&client, &uris).await.unwrap_err();
-        assert!(error.to_string().contains(expected), "{error:#}");
+        for remove in [false, true] {
+            let result = if remove {
+                collection::remove_tracks(&client, &uris).await
+            } else {
+                collection::add_tracks(&client, &uris).await
+            };
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
     }
 }
 
@@ -102,6 +279,37 @@ async fn a_failed_like_is_not_retried_and_does_not_change_cached_membership() {
     let uris = vec![uri("track", 1)];
     assert!(collection::add_tracks(&client, &uris).await.is_err());
     assert_eq!(collection::add_tracks(&client, &uris).await.unwrap(), 1);
+    let requests = task.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].path.starts_with("POST /collection/v2/write "));
+    assert!(requests[2].path.starts_with("POST /collection/v2/write "));
+}
+
+#[tokio::test]
+async fn a_failed_unlike_is_not_retried_and_preserves_cached_membership() {
+    use crate::spotify::protocol::collection::{CollectionItem, PageResponse};
+    let track = uri("track", 1);
+    let (client, task) = server(vec![
+        (
+            200,
+            PageResponse {
+                items: vec![CollectionItem {
+                    uri: track.clone(),
+                    added_at: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+            .write_to_bytes()
+            .unwrap(),
+        ),
+        (503, b"temporarily unavailable".to_vec()),
+        (200, Vec::new()),
+    ])
+    .await;
+    let uris = vec![track];
+    assert!(collection::remove_tracks(&client, &uris).await.is_err());
+    assert_eq!(collection::remove_tracks(&client, &uris).await.unwrap(), 1);
     let requests = task.await.unwrap();
     assert_eq!(requests.len(), 3);
     assert!(requests[1].path.starts_with("POST /collection/v2/write "));

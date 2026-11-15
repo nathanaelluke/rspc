@@ -41,24 +41,68 @@ pub struct KeybindsModal {
     filter_buffer_id: BufferId,
 }
 
-trait KeybindsExt {
-    fn sort_by_action(&self) -> impl Iterator<Item = (String, String, Cow<'static, str>)>;
+trait KeybindsExt<A> {
+    fn sort_by_action(
+        &self,
+        filter: impl Fn(&A) -> bool + Copy,
+    ) -> impl Iterator<Item = (String, String, Cow<'static, str>)>;
 }
 
-impl<K, ActionEnum, Discriminant> KeybindsExt for HashMap<K, ActionEnum>
+impl<K, ActionEnum, Discriminant> KeybindsExt<ActionEnum> for HashMap<K, ActionEnum>
 where
     K: Display + std::cmp::PartialEq<K>,
     ActionEnum: Display + ToDescription + IntoDiscriminant<Discriminant = Discriminant>,
     Discriminant: VariantArray + std::cmp::PartialEq<Discriminant>,
 {
-    fn sort_by_action(&self) -> impl Iterator<Item = (String, String, Cow<'static, str>)> {
-        Discriminant::VARIANTS.iter().flat_map(|variant| {
+    fn sort_by_action(
+        &self,
+        filter: impl Fn(&ActionEnum) -> bool + Copy,
+    ) -> impl Iterator<Item = (String, String, Cow<'static, str>)> {
+        Discriminant::VARIANTS.iter().flat_map(move |variant| {
             self.iter()
-                .filter(|(_, v)| &v.discriminant() == variant)
+                .filter(move |(_, v)| filter(v) && &v.discriminant() == variant)
                 .map(|(k, v)| (k.to_string(), v))
                 .sorted_by(|a, b| a.0.cmp(&b.0))
                 .map(|(k, v)| (k, v.to_string(), v.to_description()))
         })
+    }
+}
+
+fn common_section(action: &CommonAction) -> &'static str {
+    use CommonAction as A;
+    match action {
+        A::Sort { .. } | A::ReverseSort => "Sorting",
+        A::AddToLikedSongs { .. } | A::Save { .. } | A::DeleteFromPlaylist { .. } => "Library",
+        A::AddOptions { .. } => "Queue",
+        A::Select
+        | A::InvertSelection
+        | A::Delete
+        | A::Rename
+        | A::ShowInfo
+        | A::ContextMenu
+        | A::Rate { .. }
+        | A::MoveUp
+        | A::MoveDown => "Selection",
+        A::Up
+        | A::Down
+        | A::Left
+        | A::Right
+        | A::PaneUp
+        | A::PaneDown
+        | A::PaneLeft
+        | A::PaneRight
+        | A::UpHalf
+        | A::DownHalf
+        | A::PageUp
+        | A::PageDown
+        | A::Top
+        | A::Bottom
+        | A::EnterSearch
+        | A::NextResult
+        | A::PreviousResult
+        | A::Close
+        | A::Confirm
+        | A::FocusInput => "Navigation",
     }
 }
 
@@ -307,44 +351,42 @@ impl Modal for KeybindsModal {
         let keybinds = &ctx.config.keybinds;
         let header_style = ctx.config.theme.highlighted_item_style;
 
-        let global = keybinds.global.sort_by_action().collect_vec();
-        let navigation = keybinds.navigation.sort_by_action().collect_vec();
-        let queue = keybinds.queue.sort_by_action().collect_vec();
-        let global_rows: (Vec<_>, Vec<_>) = row(
-            &global,
-            key_area.width,
-            action_area.width,
-            desc_area.width,
-            self.filter_active.then_some(filter.as_str()),
-            ctx.config.theme.highlighted_item_style,
-        )
-        .unzip();
-        let nav_rows: (Vec<_>, Vec<_>) = row(
-            &navigation,
-            key_area.width,
-            action_area.width,
-            desc_area.width,
-            self.filter_active.then_some(filter.as_str()),
-            ctx.config.theme.highlighted_item_style,
-        )
-        .unzip();
-        let queue_rows: (Vec<_>, Vec<_>) = row(
-            &queue,
-            key_area.width,
-            action_area.width,
-            desc_area.width,
-            self.filter_active.then_some(filter.as_str()),
-            ctx.config.theme.highlighted_item_style,
-        )
-        .unzip();
+        let common = |section| {
+            keybinds
+                .navigation
+                .sort_by_action(move |action| common_section(action) == section)
+                .collect_vec()
+        };
+        let sections = [
+            (
+                "Global",
+                keybinds.global.sort_by_action(|_| true).collect_vec(),
+            ),
+            ("Navigation", common("Navigation")),
+            ("Selection", common("Selection")),
+            ("Sorting", common("Sorting")),
+            ("Library", common("Library")),
+            (
+                "Queue",
+                common("Queue")
+                    .into_iter()
+                    .chain(keybinds.queue.sort_by_action(|_| true))
+                    .collect_vec(),
+            ),
+        ];
 
         let mut rows = Vec::new();
         self.filter_rows.clear();
-        for (keys, label, (search, bindings)) in [
-            (&global, "Global", global_rows),
-            (&navigation, "Navigation", nav_rows),
-            (&queue, "Queue", queue_rows),
-        ] {
+        for (label, keys) in &sections {
+            let (search, bindings): (Vec<_>, Vec<_>) = row(
+                keys,
+                key_area.width,
+                action_area.width,
+                desc_area.width,
+                self.filter_active.then_some(filter.as_str()),
+                header_style,
+            )
+            .unzip();
             if let Some(header) = row_header(keys, label, header_style) {
                 if !rows.is_empty() {
                     rows.push(Row::new(["", "", ""]));
@@ -536,6 +578,59 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, style::Color};
     use rstest::rstest;
     use std::sync::Arc;
+
+    #[rstest]
+    fn custom_library_and_sorting_bindings_appear_in_their_own_sections(mut ctx: Ctx) {
+        use crate::config::{keys::key::KeySequence, sort_mode::SongSortKey};
+        let config = Arc::make_mut(&mut ctx.config);
+        config.keybinds.global.clear();
+        config.keybinds.queue.clear();
+        config.keybinds.navigation = HashMap::from([
+            (KeySequence::new().char('j'), CommonAction::Down),
+            (KeySequence::new().char(' '), CommonAction::Select),
+            (
+                KeySequence::new().char('o').char('r'),
+                CommonAction::Sort {
+                    by: SongSortKey::Recent,
+                },
+            ),
+            (
+                KeySequence::new().char('s').ctrl().char('l'),
+                CommonAction::AddToLikedSongs { current: false },
+            ),
+            (
+                KeySequence::new().char('s').ctrl().char('L'),
+                CommonAction::AddToLikedSongs { current: true },
+            ),
+        ]);
+        let mut modal = KeybindsModal::new(&mut ctx);
+        let mut terminal = Terminal::new(TestBackend::new(140, 50)).expect("test terminal");
+        terminal
+            .draw(|frame| modal.render(frame, &mut ctx).expect("render help"))
+            .expect("draw help");
+        let buffer = terminal.backend().buffer();
+        let lines = (0..50)
+            .map(|y| {
+                (0..140)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect_vec();
+        let position = |text: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(text))
+                .expect(text)
+        };
+        let navigation = position("Navigation");
+        let selection = position("Selection");
+        let sorting = position("Sorting");
+        let library = position("Library");
+        assert!(navigation < selection && selection < sorting && sorting < library);
+        assert!(position(" or ") > sorting && position(" or ") < library);
+        assert!(position("<C-s>l") > library);
+        assert!(position("<C-s>L") > library);
+    }
 
     #[rstest]
     fn section_headers_are_skipped_by_keys_and_mouse_and_keep_their_style(mut ctx: Ctx) {

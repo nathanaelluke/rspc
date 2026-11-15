@@ -1,7 +1,7 @@
 rspc third-party licenses
 Generated with cargo-about 0.9.0
-Inputs SHA256: 5647d93af37d0e27f093cf11453ebcb07d5892249421c1edfd0aed24c6e7d20d
-Text SHA256: 78b635e5672cad38e72becf58738d0613ba12a20f7fdae358dbe9e571124af04
+Inputs SHA256: 10fd1cc78c97321f9ffa7e9efb475d92319e0e97781e0b9e91b63dd590282e5f
+Text SHA256: 30baf486595c77a3f5e83583cfb8aaab6d48ecdec1fd9395f00692786cb99291
 
 These notices cover Rust dependencies for all three supported release targets,
 including build tools. rspc's own licenses are distributed separately.
@@ -9,8 +9,8 @@ including build tools. rspc's own licenses are distributed separately.
 Corresponding source and rebuilding
 ===================================
 The complete application and vendored Cargo dependency sources are provided in
-rspc-0.1.0-source.tar.gz alongside the binaries at:
-https://github.com/nathanaelluke/rspc/releases/tag/v0.1.0
+rspc-0.1.1-source.tar.gz alongside the binaries at:
+https://github.com/nathanaelluke/rspc/releases/tag/v0.1.1
 
 You may modify and relink the LGPL-covered dependency under the terms below.
 To do so, extract the source archive, copy the dependency out of vendor/, and

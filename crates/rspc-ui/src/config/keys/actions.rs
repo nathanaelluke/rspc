@@ -806,6 +806,10 @@ impl Default for DeleteKind {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq)]
 pub enum CommonActionFile {
+    AddToLikedSongs {
+        #[serde(default)]
+        current: bool,
+    },
     Sort {
         by: crate::config::sort_mode::SongSortKey,
     },
@@ -871,6 +875,9 @@ pub enum CommonActionFile {
 #[derive(Debug, Display, Clone, EnumDiscriminants, PartialEq)]
 #[strum_discriminants(derive(VariantArray))]
 pub enum CommonAction {
+    AddToLikedSongs {
+        current: bool,
+    },
     Sort {
         by: crate::config::sort_mode::SongSortKey,
     },
@@ -924,8 +931,10 @@ pub enum CommonAction {
 impl ToDescription for CommonAction {
     fn to_description(&self) -> Cow<'static, str> {
         match self {
-            CommonAction::Sort { by } => format!("Sort playlist by {by}").into(),
-            CommonAction::ReverseSort => "Reverse this playlist's view order".into(),
+            CommonAction::Sort { by } => format!("Sort songs by {by}").into(),
+            CommonAction::ReverseSort => "Reverse the song view order".into(),
+            CommonAction::AddToLikedSongs { current: false } => "Add selected or marked songs to Spotify Liked Songs".into(),
+            CommonAction::AddToLikedSongs { current: true } => "Add the currently playing song to Spotify Liked Songs".into(),
             CommonAction::Up => "Go up".into(),
             CommonAction::Down => "Go down".into(),
             CommonAction::UpHalf => "Jump by half a screen up".into(),
@@ -946,7 +955,7 @@ impl ToDescription for CommonAction {
             }
             CommonAction::InvertSelection => "Inverts the current selected items".into(),
             CommonAction::Delete => {
-                "Delete. For example a playlist, song from a playlist or wipe the current queue".into()
+                "Delete selected items. In Liked Songs, remove selected or marked songs from Spotify Liked Songs".into()
             }
             CommonAction::Rename => "Rename. Currently only for playlists".into(),
             CommonAction::Close => {
@@ -1104,6 +1113,9 @@ impl TryFrom<CommonActionFile> for CommonAction {
 
     fn try_from(value: CommonActionFile) -> Result<Self, Self::Error> {
         Ok(match value {
+            CommonActionFile::AddToLikedSongs { current } => {
+                CommonAction::AddToLikedSongs { current }
+            }
             CommonActionFile::Sort { by } => CommonAction::Sort { by },
             CommonActionFile::ReverseSort => CommonAction::ReverseSort,
             CommonActionFile::Up => CommonAction::Up,

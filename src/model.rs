@@ -21,6 +21,13 @@ pub struct ArtistRef {
     pub name: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LibraryItem {
+    pub uri: String,
+    pub name: String,
+    pub saved: bool,
+}
+
 /// Field names are the queue-file format; defaults keep older queues readable.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

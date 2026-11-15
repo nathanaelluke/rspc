@@ -8,9 +8,10 @@ use ratatui::{
     layout::Flex,
     prelude::{Constraint, Layout, Rect},
     style::Style,
-    text::{Line, Span},
+    text::Line,
     widgets::{Block, Row, TableState},
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::Pane;
 use crate::{
@@ -34,7 +35,6 @@ use crate::{
         macros::{modal, status_error, status_info, status_warn},
         mouse_event::{MouseEvent, MouseEventKind, calculate_scrollbar_position},
         mpd_client_ext::{Enqueue, MpdClientExt},
-        song_ext::SongsExt,
     },
     ui::{
         UiEvent,
@@ -45,9 +45,10 @@ use crate::{
             info_list_modal::InfoListModal,
             input_modal::InputModal,
             menu::{
-                add_song_save_actions, add_to_playlist_or_show_modal, create_add_modal,
-                create_delete_modal, create_rating_modal, create_save_modal,
-                delete_from_playlist_or_show_confirmation, modal::MenuModal,
+                add_saved_library_actions, add_song_collection_actions, add_to_liked_songs,
+                add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
+                create_rating_modal, create_save_modal, delete_from_playlist_or_show_confirmation,
+                modal::MenuModal,
             },
             select_modal::SelectModal,
         },
@@ -177,7 +178,12 @@ impl QueuePane {
                     .items(false)
                     .map(|(_, song)| song.file.clone())
                     .collect::<Vec<_>>();
-                add_song_save_actions(&mut section, ctx, move |_: &mut Client<'_>| Ok(selected));
+                add_song_collection_actions(&mut section, ctx, move |_: &mut Client<'_>| {
+                    Ok(selected)
+                });
+                if let Some(song) = self.queue.selected() {
+                    add_saved_library_actions(&mut section, ctx, "track", song.file.clone());
+                }
                 let items = self
                     .queue
                     .items
@@ -292,15 +298,8 @@ impl Pane for QueuePane {
 
         let formats = &config.theme.song_table_format;
 
-        let marker_symbol_len = config.theme.symbols.marker.chars().count();
+        let marker_symbol_len = config.theme.symbols.marker.width();
 
-        let new_album_indices: HashSet<usize> = self
-            .queue
-            .items
-            .as_slice()
-            .to_album_ranges()
-            .map(|range| range.end.saturating_sub(1))
-            .collect();
         let current_song_id = ctx.find_current_song_in_queue().map(|(_, song)| song.id);
         let marked = std::mem::take(self.queue.marked_mut());
         let filter = ctx.input.value(self.queue.filter_buffer_id);
@@ -315,9 +314,6 @@ impl Pane for QueuePane {
                 let is_marked = marked.contains(&idx);
                 let columns = (0..formats.len()).map(|i| {
                     let mut max_len: usize = widths[i].width.into();
-                    // We have to subtract marker symbol length from max len in order to make space
-                    // for the marker symbol in case we are in the first column of the table and the
-                    // song is marked.
                     if is_marked && i == 0 {
                         max_len = max_len.saturating_sub(marker_symbol_len);
                     }
@@ -335,10 +331,7 @@ impl Pane for QueuePane {
                         .alignment(formats[i].alignment.into());
 
                     if is_marked && i == 0 {
-                        let marker_span = Span::styled(
-                            &config.theme.symbols.marker,
-                            config.theme.highlighted_item_style,
-                        );
+                        let marker_span = crate::ui::dirstack::marker_span(ctx, is_marked);
                         line.spans.splice(..0, std::iter::once(marker_span));
                     }
 
@@ -358,9 +351,12 @@ impl Pane for QueuePane {
                 }
 
                 let sep = ctx.config.theme.song_table_album_separator;
-                if new_album_indices.contains(&idx)
-                    && matches!(sep, AlbumSeparator::Underline)
-                    && idx != self.queue.items.len().saturating_sub(1)
+                if matches!(sep, AlbumSeparator::Underline)
+                    && self
+                        .queue
+                        .items
+                        .get(idx + 1)
+                        .is_some_and(|next| !song.same_album(next))
                 {
                     row.underlined = true;
                 }
@@ -1026,9 +1022,6 @@ impl Pane for QueuePane {
                 CommonAction::Select => {
                     if self.queue.selected().is_some() {
                         self.queue.toggle_mark_selected();
-                        self.queue
-                            .next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-
                         ctx.render()?;
                     }
                 }
@@ -1102,6 +1095,14 @@ impl Pane for QueuePane {
                 CommonAction::PaneLeft => {}
                 CommonAction::ContextMenu => {
                     self.open_context_menu(ctx);
+                }
+                CommonAction::AddToLikedSongs { current: true } => event.abandon(),
+                CommonAction::AddToLikedSongs { current: false } => {
+                    let paths = self
+                        .items(false)
+                        .map(|(_, song)| song.file.clone())
+                        .collect();
+                    add_to_liked_songs(ctx, move |_| Ok(paths));
                 }
                 CommonAction::Sort { .. } | CommonAction::ReverseSort => {
                     status_warn!("Open a playlist or album to sort its songs");
@@ -1310,6 +1311,55 @@ mod selection_info_tests {
     use crossbeam::channel::{Receiver, Sender};
     use rstest::rstest;
     use std::sync::Arc;
+
+    #[rstest]
+    #[case(false, 3)]
+    #[case(true, 3)]
+    #[case(true, 5)]
+    fn album_separators_use_album_artists_and_the_next_offscreen_song(
+        mut ctx: Ctx,
+        #[case] enabled: bool,
+        #[case] height: u16,
+    ) {
+        let config = Arc::make_mut(&mut ctx.config);
+        config.theme.scrollbar = None;
+        config.theme.song_table_album_separator = if enabled {
+            AlbumSeparator::Underline
+        } else {
+            AlbumSeparator::None
+        };
+        ctx.queue = [
+            ("Shared", "First"),
+            ("Shared", "First"),
+            ("Shared", "Second"),
+            ("Other", "Second"),
+            ("Other", "Second"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (album, artist))| Song {
+            id: index as u32,
+            metadata: std::collections::HashMap::from([
+                ("artist".into(), artist.into()),
+                ("album".into(), album.into()),
+                ("albumartist".into(), artist.into()),
+            ]),
+            ..Song::default()
+        })
+        .collect();
+        let mut pane = QueuePane::new(&ctx);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height))
+            .expect("terminal");
+        terminal
+            .draw(|frame| pane.render(frame, frame.area(), &ctx).expect("queue"))
+            .expect("draw");
+        for row in 0..height {
+            let underline = terminal.backend().buffer()[(0, row)]
+                .modifier
+                .contains(ratatui::style::Modifier::UNDERLINED);
+            assert_eq!(underline, enabled && matches!(row, 1 | 2), "row {row}");
+        }
+    }
 
     #[rstest]
     fn marked_queue_songs_show_combined_info(

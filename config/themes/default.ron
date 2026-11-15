@@ -23,7 +23,7 @@
         song: "S",
         dir: "D",
         playlist: "P",
-        marker: "M",
+        marker: "M ",
         ellipsis: "...",
         song_style: None,
         dir_style: None,

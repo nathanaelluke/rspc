@@ -76,6 +76,8 @@ pub struct Ctx {
     pub(crate) ytdlp_manager: YtDlpManager,
     pub(crate) cached_queue_time_total: Duration,
     pub(crate) collection_sorts: RefCell<crate::shared::collection_sort::CollectionSorts>,
+    #[debug(skip)]
+    pub(crate) liked_song_uris: RefCell<Option<std::sync::Arc<HashSet<String>>>>,
 }
 
 #[bon]
@@ -144,7 +146,25 @@ impl Ctx {
             key_resolver,
             cached_queue_time_total,
             collection_sorts: RefCell::new(collection_sorts),
+            liked_song_uris: RefCell::new(None),
         })
+    }
+
+    pub(crate) fn update_server_capabilities(
+        &mut self,
+        version: Version,
+        commands: HashSet<String>,
+    ) {
+        self.mpd_version = version;
+        self.stickers_supported = if commands.contains("sticker") {
+            StickersSupport::Supported
+        } else {
+            StickersSupport::Unsupported
+        };
+        self.supported_commands = commands;
+        self.stickers.clear();
+        self.stickers_to_fetch.borrow_mut().clear();
+        self.liked_song_uris.borrow_mut().take();
     }
 
     // TODO: Error comes from crossebeam, try to remove later if it gets solved
@@ -266,22 +286,17 @@ impl Ctx {
             return None;
         }
 
-        // Use indexing by "song" instead of finding the song by id when the queue is
-        // very large to avoid performance issues. The indexing is not used by default
-        // because it can cause small/short desyncs when queue is being updated by
-        // moving/shuffling the songs.
-        if self.queue.len() > 3_000 {
-            self.status
-                .song
-                .and_then(|idx| self.queue.get(idx).map(|song| (idx, song)))
-        } else {
-            self.status.songid.and_then(|id| {
-                self.queue
-                    .iter()
-                    .enumerate()
-                    .find(|(_, song)| song.id == id)
-            })
+        let id = self.status.songid?;
+        if let Some(index) = self.status.song
+            && let Some(song) = self.queue.get(index)
+            && song.id == id
+        {
+            return Some((index, song));
         }
+        self.queue
+            .iter()
+            .enumerate()
+            .find(|(_, song)| song.id == id)
     }
 
     pub(crate) fn find_current_lyrics_path(&self) -> Option<PathBuf> {
@@ -378,5 +393,44 @@ impl From<StickersSupport> for bool {
             StickersSupport::Unsupported => false,
             StickersSupport::UnsupportedAndChecked => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::fixtures::ctx;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(3)]
+    #[case(3_001)]
+    fn current_song_survives_stale_or_missing_queue_positions(mut ctx: Ctx, #[case] len: usize) {
+        ctx.queue = (0..len)
+            .map(|index| Song {
+                id: index as u32 + 1,
+                ..Song::default()
+            })
+            .collect();
+        for state in [State::Play, State::Pause] {
+            ctx.status.state = state;
+            ctx.status.songid = Some(2);
+            for position in [Some(1), Some(0), Some(len), None] {
+                ctx.status.song = position;
+                assert_eq!(
+                    ctx.find_current_song_in_queue()
+                        .map(|(index, song)| (index, song.id)),
+                    Some((1, 2))
+                );
+            }
+        }
+        ctx.status.song = Some(1);
+        for id in [None, Some(len as u32 + 1)] {
+            ctx.status.songid = id;
+            assert!(ctx.find_current_song_in_queue().is_none());
+        }
+        ctx.status.state = State::Stop;
+        ctx.status.songid = Some(2);
+        assert!(ctx.find_current_song_in_queue().is_none());
     }
 }

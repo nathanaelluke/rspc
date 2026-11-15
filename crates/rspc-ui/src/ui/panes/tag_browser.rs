@@ -199,6 +199,13 @@ impl TagBrowserPane {
 }
 
 impl Pane for TagBrowserPane {
+    fn prefetch(&mut self, _area: Rect, ctx: &Ctx) -> Result<()> {
+        if !self.initialized {
+            self.before_show(ctx)?;
+        }
+        Ok(())
+    }
+
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
         self.restore_sort(ctx);
         self.browser
@@ -453,6 +460,23 @@ impl BrowserPane<DirOrSong> for TagBrowserPane {
             },
             item.as_path().to_owned(),
         ))
+    }
+
+    fn library_targets(&self, item: &DirOrSong) -> Vec<(&'static str, String)> {
+        if let Some(song) = item.as_song() {
+            return vec![("track", song.file.clone())];
+        }
+        if self.paged_artists && self.stack.path().as_slice().len() == 1 {
+            return self
+                .album_sources
+                .get(&self.stack.path().join(item.as_path()))
+                .into_iter()
+                .flatten()
+                .cloned()
+                .map(|source| ("path", source))
+                .collect();
+        }
+        self.info_target(item).into_iter().collect()
     }
 
     fn list_songs_in_item(

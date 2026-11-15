@@ -155,8 +155,18 @@ impl AlbumArtFacade {
     }
 
     pub fn show_default(&mut self, ctx: &Ctx) -> Result<()> {
-        self.current_album_art = Some(Arc::clone(&self.default_album_art));
-        self.show_current(ctx)
+        self.show(Arc::clone(&self.default_album_art), ctx)
+    }
+
+    pub fn prepare_default(&mut self, ctx: &Ctx) -> Result<()> {
+        self.prepare(Arc::clone(&self.default_album_art), ctx)
+    }
+
+    pub fn prepare_current(&mut self, ctx: &Ctx) -> Result<()> {
+        if let Some(data) = self.current_album_art.as_ref().map(Arc::clone) {
+            self.prepare(data, ctx)?;
+        }
+        Ok(())
     }
 
     pub fn show_current(&mut self, ctx: &Ctx) -> Result<()> {
@@ -196,12 +206,17 @@ impl AlbumArtFacade {
     }
 
     pub fn show(&mut self, data: impl Into<Arc<Vec<u8>>>, ctx: &Ctx) -> Result<()> {
+        self.is_showing = true;
+        self.prepare(data, ctx)
+    }
+
+    /// Decode and encode ahead of navigation without writing to the terminal.
+    pub fn prepare(&mut self, data: impl Into<Arc<Vec<u8>>>, ctx: &Ctx) -> Result<()> {
         let data = data.into();
         self.current_album_art = Some(Arc::clone(&data));
         if matches!(self.image_backend, ImageBackend::None) {
             return Ok(());
         }
-        self.is_showing = true;
         let request = ImageRequest {
             data,
             area: self.last_size,
@@ -212,13 +227,16 @@ impl AlbumArtFacade {
             method: self.render_method(),
         };
         self.desired = Some(request.clone());
-        self.display_pending = self
+        let ready = self
             .prepared
             .as_ref()
             .is_some_and(|(key, _)| key == &request);
-        if self.display_pending {
-            ctx.render()?;
-        } else if self.in_flight.is_none() {
+        self.display_pending = self.is_showing && ready;
+        if ready {
+            if self.is_showing {
+                ctx.render()?;
+            }
+        } else if self.in_flight.is_none() && request.area.width > 0 && request.area.height > 0 {
             self.encode(request)?;
         }
         Ok(())
@@ -247,8 +265,9 @@ impl AlbumArtFacade {
     }
 
     fn encode_latest(&mut self) -> Result<()> {
-        if self.is_showing
-            && let Some(request) = self.desired.as_ref()
+        if let Some(request) = self.desired.as_ref()
+            && request.area.width > 0
+            && request.area.height > 0
             && self.prepared.as_ref().is_none_or(|(key, _)| key != request)
         {
             self.encode(request.clone())?;
@@ -456,6 +475,41 @@ mod tests {
         facade
             .display(encode().expect("encode image"), ctx)
             .expect("receive image");
+    }
+
+    #[rstest]
+    fn prefetch_encodes_while_hidden_and_first_show_needs_no_more_work(
+        mut ctx: Ctx,
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+    ) {
+        ctx.work_sender = work_request_channel.0.clone();
+        let mut facade = configured(&mut ctx);
+        facade.prepare_default(&ctx).expect("prefetch cover");
+        complete(&work_request_channel.1, &mut facade, &ctx);
+        assert!(!facade.is_showing);
+        assert!(!facade.display_pending);
+        facade.show_current(&ctx).expect("first visit");
+        assert!(facade.display_pending);
+        assert!(work_request_channel.1.is_empty());
+    }
+
+    #[rstest]
+    fn newer_hidden_covers_are_encoded_after_stale_work_finishes(
+        mut ctx: Ctx,
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+    ) {
+        ctx.work_sender = work_request_channel.0.clone();
+        let mut facade = configured(&mut ctx);
+        facade.prepare_default(&ctx).expect("first cover");
+        let mut next = ctx.config.theme.default_album_art.to_vec();
+        next.push(0); // A distinct image with the same valid image payload.
+        facade.prepare(next, &ctx).expect("newer cover");
+        complete(&work_request_channel.1, &mut facade, &ctx);
+        assert!(facade.prepared.is_none());
+        complete(&work_request_channel.1, &mut facade, &ctx);
+        assert!(facade.prepared.is_some());
+        assert!(!facade.is_showing);
+        assert!(!facade.display_pending);
     }
 
     #[rstest]

@@ -46,6 +46,29 @@ mod sorting {
     }
 
     #[rstest]
+    fn deleting_multiple_sorted_songs_removes_only_the_marked_songs(ctx: Ctx) {
+        let mut screen = PlaylistsPane::new(&ctx);
+        screen.stack = DirStack::new(vec![dir("Mix")]);
+        let original = vec![row("Zulu", 10), row("Middle", 20), row("Alpha", 30)];
+        screen.stack.insert("Mix".into(), original.clone());
+        screen.stack.enter();
+        screen.change_sort(Some(SongSortKey::Title), &ctx).unwrap();
+        screen.stack.current_mut().state.mark(0);
+        screen.stack.current_mut().state.mark(2);
+
+        let mut remaining = original;
+        // The client executes positional deletions from last to first.
+        for deletion in screen.delete_items(false).into_iter().rev() {
+            let MpdDelete::SongInPlaylist { range, .. } = deletion else {
+                panic!("expected a song deletion");
+            };
+            remaining.remove(range.start);
+        }
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].as_path(), "Middle");
+    }
+
+    #[rstest]
     fn sorting_is_per_playlist_and_keeps_backend_positions_without_sending_mutations(
         app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
         work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),

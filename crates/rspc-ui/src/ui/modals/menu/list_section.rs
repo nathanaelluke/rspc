@@ -18,6 +18,7 @@ pub struct ListSection {
     pub current_item_style: Style,
     max_height: Option<usize>,
     pub state: DirState<ListState>,
+    pub(super) library: Option<super::library::LibraryRequest>,
 }
 
 #[derive(Copy, Clone, Debug, Enum, Eq, PartialEq, Hash)]
@@ -42,6 +43,7 @@ impl ListSection {
             current_item_style,
             max_height: None,
             state: DirState::default(),
+            library: None,
         }
     }
 
@@ -139,8 +141,9 @@ impl Section for ListSection {
             && let Some(cb) = self.items[selected_idx].on_confirm.take()
         {
             (cb)(ctx)?;
+            return Ok(true);
         }
-        Ok(true)
+        Ok(false)
     }
 
     fn len(&self) -> usize {
@@ -206,8 +209,7 @@ impl Section for ListSection {
     }
 
     fn double_click(&mut self, _pos: Position, ctx: &Ctx) -> Result<bool> {
-        self.confirm(ctx)?;
-        Ok(false)
+        self.confirm(ctx)
     }
 
     fn item_labels_iter(&self) -> Box<dyn Iterator<Item = &str> + '_> {

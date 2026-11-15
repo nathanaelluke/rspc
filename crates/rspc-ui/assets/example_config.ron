@@ -108,7 +108,7 @@
             "<PageDown>": PageDown,
             "gg":         Top,
             "G":          Bottom,
-            "<Space>":    Select,
+            "m":          Select,
             "<C-Space>":  InvertSelection,
             "/":          EnterSearch,
             "n":          NextResult,
@@ -122,6 +122,8 @@
             "<C-z>":      ContextMenu(),
             "<C-s>s":     Save(kind: Modal(all: false, duplicates_strategy: Ask)),
             "<C-s>a":     Save(kind: Modal(all: true, duplicates_strategy: Ask)),
+            "<C-s>l":     AddToLikedSongs(current: false),
+            "<C-s>L":     AddToLikedSongs(current: true),
             "r":          Rate(),
         },
         queue: {
@@ -228,16 +230,6 @@
             ),
         ),
         (
-            name: "Directories",
-            borders: "ALL",
-            border_symbols: Rounded,
-            pane: Split(
-                size: "100%",
-                direction: Vertical,
-                panes: [(pane: Pane(Directories), size: "100%", borders: "ALL", border_symbols: Rounded)],
-            )
-        ),
-        (
             name: "Artists",
             borders: "ALL",
             border_symbols: Rounded,
@@ -247,16 +239,7 @@
                 panes: [(pane: Pane(Artists), size: "100%", borders: "ALL", border_symbols: Rounded)],
             )
         ),
-        (
-            name: "Album Artists",
-            borders: "ALL",
-            border_symbols: Rounded,
-            pane: Split(
-                size: "100%",
-                direction: Vertical,
-                panes: [(pane: Pane(AlbumArtists), size: "100%", borders: "ALL", border_symbols: Rounded)],
-            )
-        ),
+        (name: "Liked Songs", pane: Pane(LikedSongs)),
         (
             name: "Albums",
             borders: "ALL",
@@ -278,6 +261,16 @@
             )
         ),
         (
+            name: "Directories",
+            borders: "ALL",
+            border_symbols: Rounded,
+            pane: Split(
+                size: "100%",
+                direction: Vertical,
+                panes: [(pane: Pane(Directories), size: "100%", borders: "ALL", border_symbols: Rounded)],
+            )
+        ),
+        (
             name: "Search",
             borders: "ALL",
             border_symbols: Rounded,
@@ -287,6 +280,5 @@
                 panes: [(pane: Pane(Search), size: "100%", borders: "ALL", border_symbols: Rounded)],
             )
         ),
-        (name: "Liked Songs", pane: Pane(LikedSongs)),
     ],
 )

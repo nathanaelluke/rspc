@@ -26,6 +26,7 @@ async fn adding_liked_songs_updates_the_library_without_touching_playlists() {
     new.name = "A new liked song".into();
     catalog.remember(vec![new.clone()]).await;
     let uri = new.uri.clone().unwrap();
+    let before = chrono::Utc::now();
     assert_eq!(
         catalog
             .add_liked(&[uri.clone(), uri.clone()])
@@ -36,6 +37,8 @@ async fn adding_liked_songs_updates_the_library_without_touching_playlists() {
     assert_eq!(catalog.add_liked(&[uri]).await.unwrap(), 0);
     let liked = catalog.liked().await.unwrap();
     assert_eq!(liked.len(), original.len() + 1);
+    assert!(liked[0].added_at.is_some_and(|date| date >= before));
+    new.added_at = liked[0].added_at;
     assert_eq!(liked[0], new);
     assert_eq!(catalog.playlist_tracks("Demo Mix").await.unwrap(), original);
     assert!(catalog.add_liked(&["mpd:file.flac".into()]).await.is_err());
@@ -48,6 +51,87 @@ fn persistent_pages_are_partitioned_by_account_without_storing_its_name() {
     assert_ne!(first, account_namespace(Some("second-user")));
     assert!(!first.contains("first-user"));
     assert_ne!(account_namespace(None), account_namespace(None));
+}
+
+#[tokio::test]
+async fn library_actions_use_credited_ids_and_ignore_local_tracks() {
+    let catalog = Arc::new(Catalog::new(true));
+    let mut track = demo_tracks().remove(0);
+    track.uri = Some("spotify:track:new-fixture".into());
+    track.album_id = Some("new-album".into());
+    track.album = "An unsaved album".into();
+    track.artist_refs = vec![
+        ArtistRef {
+            id: Some("new-artist".into()),
+            name: "An unfollowed artist".into(),
+        },
+        ArtistRef {
+            id: None,
+            name: "A local credit".into(),
+        },
+    ];
+    let mut local = track.clone();
+    local.uri = Some("mpd:local.flac".into());
+    local.is_local = true;
+    catalog.remember(vec![track, local]).await;
+    let items = catalog
+        .library_items("track", "spotify:track:new-fixture")
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|item| !item.saved));
+    assert_eq!(items[0].uri, "spotify:album:new-album");
+    assert_eq!(items[1].uri, "spotify:artist:new-artist");
+    assert!(
+        catalog
+            .library_items("track", "mpd:local.flac")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(catalog.saved_albums().await.unwrap().len(), 1);
+    assert_eq!(catalog.artists().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn album_and_artist_actions_do_not_load_unrelated_collections() {
+    for (kind, name, uri) in [
+        ("album", "Playlist Album", "spotify:album:album1"),
+        ("artist", "Playlist Artist", "spotify:artist:artist1"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut catalog = Catalog::new(false);
+        catalog.disk_root = directory.path().join("catalog");
+        if kind == "album" {
+            cache_page(
+                &catalog,
+                "me/albums",
+                0,
+                vec![json!({"album":playlist_track(0)["album"]})],
+                1,
+            );
+        } else {
+            cache_following(
+                &catalog,
+                None,
+                vec![json!({"id":"artist1","name":name})],
+                None,
+            );
+        }
+        let catalog = Arc::new(catalog);
+        let _network = catalog
+            .limit
+            .acquire_many(catalog.limit.available_permits() as u32)
+            .await
+            .unwrap();
+        let items = tokio::time::timeout(Duration::from_secs(5), catalog.library_items(kind, name))
+            .await
+            .expect("cached collection actions must not wait for unrelated network requests")
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].uri, uri);
+        assert!(items[0].saved);
+    }
 }
 
 #[test]
@@ -610,10 +694,14 @@ fn cache_following(catalog: &Catalog, after: Option<&str>, items: Vec<Value>, ne
 async fn playlist_edits_preserve_duplicates_and_do_not_change_the_queue() {
     let catalog = Arc::new(Catalog::new(true));
     catalog.playlist_save("Copy", demo_tracks()).await.unwrap();
+    let before = chrono::Utc::now();
     catalog
         .playlist_add("Copy", "spotify:track:demo1", Some(1))
         .await
         .unwrap();
+    let added = catalog.playlist_tracks("Copy").await.unwrap();
+    assert!(added[1].added_at.is_some_and(|date| date >= before));
+    assert_eq!(added[0].added_at, demo_tracks()[0].added_at);
     catalog.playlist_remove("Copy", 0, 1).await.unwrap();
     catalog.playlist_move("Copy", 0, 1, 2).await.unwrap();
     let tracks = catalog.playlist_tracks("Copy").await.unwrap();
@@ -979,19 +1067,28 @@ async fn album_recency_uses_library_dates_and_never_playlist_dates() {
     cached.added_at = Some("2099-01-01T00:00:00Z".parse().unwrap());
     catalog.remember(vec![cached]).await;
     *catalog.cooldown.lock().await = Some(std::time::Instant::now() + Duration::from_secs(60));
-    let tracks = catalog.album_tracks_many(&[album.clone()]).await.unwrap();
+    let tracks = catalog
+        .album_tracks_many(std::slice::from_ref(&album))
+        .await
+        .unwrap();
     assert_eq!(
         tracks[0].added_at, None,
         "playlist metadata must not leak into album recency"
     );
     catalog.saved_albums().await.unwrap();
-    let tracks = catalog.album_tracks_many(&[album.clone()]).await.unwrap();
+    let tracks = catalog
+        .album_tracks_many(std::slice::from_ref(&album))
+        .await
+        .unwrap();
     assert_eq!(
         tracks[0].added_at.unwrap().to_rfc3339(),
         "2026-01-02T00:00:00+00:00"
     );
     catalog.liked().await.unwrap();
-    let tracks = catalog.album_tracks_many(&[album.clone()]).await.unwrap();
+    let tracks = catalog
+        .album_tracks_many(std::slice::from_ref(&album))
+        .await
+        .unwrap();
     assert_eq!(
         tracks[0].added_at.unwrap().to_rfc3339(),
         "2026-01-01T00:00:00+00:00"

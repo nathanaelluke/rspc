@@ -43,9 +43,10 @@ use crate::{
             info_list_modal::InfoListModal,
             input_modal::InputModal,
             menu::{
-                add_song_save_actions, add_to_playlist_or_show_modal, create_add_modal,
-                create_delete_modal, create_rating_modal, create_save_modal,
-                delete_from_playlist_or_show_confirmation, modal::MenuModal,
+                add_saved_library_actions, add_song_collection_actions, add_to_liked_songs,
+                add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
+                create_rating_modal, create_save_modal, delete_from_playlist_or_show_confirmation,
+                modal::MenuModal,
             },
             select_modal::SelectModal,
         },
@@ -362,6 +363,14 @@ impl SearchPane {
             }
         } else if let Some(action) = event.claim_common() {
             match action.to_owned() {
+                CommonAction::AddToLikedSongs { current: true } => event.abandon(),
+                CommonAction::AddToLikedSongs { current: false } => {
+                    let paths = self
+                        .items(false)
+                        .map(|(_, song)| song.file.clone())
+                        .collect();
+                    add_to_liked_songs(ctx, move |_| Ok(paths));
+                }
                 CommonAction::Sort { .. } | CommonAction::ReverseSort => {
                     status_warn!("Open a playlist or album to sort its songs");
                 }
@@ -587,6 +596,14 @@ impl SearchPane {
             }
         } else if let Some(action) = event.claim_common() {
             match action.to_owned() {
+                CommonAction::AddToLikedSongs { current: true } => event.abandon(),
+                CommonAction::AddToLikedSongs { current: false } => {
+                    let paths = self
+                        .items(false)
+                        .map(|(_, song)| song.file.clone())
+                        .collect();
+                    add_to_liked_songs(ctx, move |_| Ok(paths));
+                }
                 CommonAction::Sort { .. } | CommonAction::ReverseSort => {
                     status_warn!("Open a playlist or album to sort its songs");
                 }
@@ -675,9 +692,6 @@ impl SearchPane {
                 }
                 CommonAction::Select => {
                     self.songs_dir.toggle_mark_selected();
-                    self.songs_dir
-                        .next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-
                     ctx.render()?;
                 }
                 CommonAction::InvertSelection => {
@@ -1012,7 +1026,12 @@ impl SearchPane {
                     .items(false)
                     .map(|(_, item)| item.file.clone())
                     .collect();
-                add_song_save_actions(&mut section, ctx, move |_: &mut Client<'_>| Ok(song_files));
+                add_song_collection_actions(&mut section, ctx, move |_: &mut Client<'_>| {
+                    Ok(song_files)
+                });
+                if let Some(song) = self.songs_dir.selected() {
+                    add_saved_library_actions(&mut section, ctx, "track", song.file.clone());
+                }
                 Some(section)
             })
             .list_section(ctx, |mut section| {
@@ -1159,9 +1178,11 @@ impl Pane for SearchPane {
                 self.songs_dir = Dir::default();
                 self.phase = Phase::Search;
 
-                status_warn!(
-                    "The music database has been updated. The current tab has been reinitialized in the root directory to prevent inconsistent behaviours."
-                );
+                if !ctx.supported_commands.contains("rspc_identity") {
+                    status_warn!(
+                        "The music database has been updated. The current tab has been reinitialized in the root directory to prevent inconsistent behaviours."
+                    );
+                }
             }
             UiEvent::Reconnected => {
                 self.phase = Phase::Search;

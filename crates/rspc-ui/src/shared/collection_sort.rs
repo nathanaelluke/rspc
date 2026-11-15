@@ -1,16 +1,22 @@
 use std::{
-    collections::BTreeMap, fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf,
+    collections::BTreeMap,
+    fs::OpenOptions,
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 
 use crate::config::sort_mode::SongSort;
 
+type SortEntries = BTreeMap<String, BTreeMap<String, SongSort>>;
+
 #[derive(Debug, Default)]
 pub struct CollectionSorts {
     backend: String,
     file: Option<PathBuf>,
-    entries: BTreeMap<String, BTreeMap<String, SongSort>>,
+    entries: SortEntries,
 }
 
 impl CollectionSorts {
@@ -28,22 +34,22 @@ impl CollectionSorts {
     }
 
     fn from_file(backend: String, file: PathBuf) -> Self {
-        let entries = match std::fs::read(&file) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                log::warn!(error:?; "Cannot read song sort preferences");
-                BTreeMap::new()
-            }),
-            Err(error) => {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    log::warn!(error:?; "Cannot read song sort preferences");
-                }
-                BTreeMap::new()
-            }
-        };
+        let entries = Self::read(&file).unwrap_or_else(|error| {
+            log::warn!(error:?; "Cannot read song sort preferences");
+            SortEntries::new()
+        });
         Self {
             backend,
             file: Some(file),
             entries,
+        }
+    }
+
+    fn read(file: &Path) -> Result<SortEntries> {
+        match std::fs::read(file) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SortEntries::new()),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -56,6 +62,22 @@ impl CollectionSorts {
     }
 
     pub fn set(&mut self, context: &str, sort: SongSort) -> Result<()> {
+        // Keep the lock across the read, update and atomic replacement so two
+        // running UIs do not overwrite each other's collection preferences.
+        let _lock = if let Some(file) = &self.file {
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(file.with_extension("lock"))?;
+            rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+            self.entries = Self::read(file)?;
+            Some(lock)
+        } else {
+            None
+        };
         let entries = self.entries.entry(self.backend.clone()).or_default();
         if sort == SongSort::default() {
             entries.remove(context);
@@ -122,7 +144,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_dir(dir.path()).expect("state files").count(),
-            1
+            2
         );
     }
 
@@ -146,5 +168,60 @@ mod tests {
             CollectionSorts::from_file("second-server".into(), file).get("Mix"),
             recent
         );
+    }
+    #[test]
+    fn overlapping_ui_sessions_do_not_erase_each_others_sort_choices() {
+        for (first_server, second_server) in [("server", "server"), ("first", "second")] {
+            let dir = tempfile::tempdir().expect("state directory");
+            let file = dir.path().join("collection-sorts.json");
+            let mut first = CollectionSorts::from_file(first_server.into(), file.clone());
+            let mut second = CollectionSorts::from_file(second_server.into(), file.clone());
+            let title = SongSort::new(SongSortKey::Title);
+            let recent = SongSort::new(SongSortKey::Recent);
+            first
+                .set("playlist:First", title)
+                .expect("save first choice");
+            second
+                .set("library:liked", recent)
+                .expect("save second choice");
+            assert_eq!(
+                CollectionSorts::from_file(first_server.into(), file.clone()).get("playlist:First"),
+                title
+            );
+            assert_eq!(
+                CollectionSorts::from_file(second_server.into(), file).get("library:liked"),
+                recent
+            );
+        }
+    }
+
+    #[test]
+    fn simultaneous_preference_writers_preserve_all_collections() {
+        let directory = tempfile::tempdir().expect("state directory");
+        let file = directory.path().join("collection-sorts.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let file = file.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    let mut sorts = CollectionSorts::from_file("server".into(), file);
+                    barrier.wait();
+                    sorts
+                        .set(
+                            &format!("playlist:{index}"),
+                            SongSort::new(SongSortKey::Title),
+                        )
+                        .expect("save preference");
+                });
+            }
+        });
+        let restarted = CollectionSorts::from_file("server".into(), file);
+        for index in 0..8 {
+            assert_eq!(
+                restarted.get(&format!("playlist:{index}")),
+                SongSort::new(SongSortKey::Title)
+            );
+        }
     }
 }

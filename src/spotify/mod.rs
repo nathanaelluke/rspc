@@ -42,6 +42,14 @@ pub async fn add_liked_tracks(uris: &[String]) -> Result<usize> {
     let session = connection::current().await.map_err(anyhow::Error::from)?;
     library::add_tracks(&session, uris).await
 }
+pub async fn remove_liked_tracks(uris: &[String]) -> Result<usize> {
+    let session = connection::current().await.map_err(anyhow::Error::from)?;
+    library::remove_tracks(&session, uris).await
+}
+pub async fn update_saved_item(uri: &str, remove: bool) -> Result<usize> {
+    let session = connection::current().await.map_err(anyhow::Error::from)?;
+    library::update_saved(&session, uri, remove).await
+}
 pub async fn create_playlist(name: &str, uris: Vec<String>) -> Result<()> {
     let session = connection::current().await.map_err(anyhow::Error::from)?;
     let playlist = playlists::create(

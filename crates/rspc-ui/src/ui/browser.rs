@@ -28,9 +28,10 @@ use crate::{
             info_list_modal::{InfoListModal, KeyValues},
             input_modal::InputModal,
             menu::{
-                add_song_save_actions, add_to_playlist_or_show_modal, create_add_modal,
-                create_delete_modal, create_rating_modal, create_save_modal,
-                delete_from_playlist_or_show_confirmation, modal::MenuModal, song_sort_modal,
+                add_saved_library_actions, add_song_collection_actions, add_to_liked_songs,
+                add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
+                create_rating_modal, create_save_modal, delete_from_playlist_or_show_confirmation,
+                modal::MenuModal, song_sort_modal,
             },
         },
         panes::Pane,
@@ -224,6 +225,14 @@ where
     }
     fn info_target(&self, _item: &T) -> Option<(&'static str, String)> {
         None
+    }
+
+    fn library_targets(&self, item: &T) -> Vec<(&'static str, String)> {
+        item.as_song()
+            .map(|song| ("track", song.file.clone()))
+            .or_else(|| self.info_target(item))
+            .into_iter()
+            .collect()
     }
 
     fn cached_info(&self, item: &T) -> Option<KeyValues> {
@@ -548,6 +557,13 @@ where
         let config = &ctx.config;
 
         match action.to_owned() {
+            CommonAction::AddToLikedSongs { current: true } => event.abandon(),
+            CommonAction::AddToLikedSongs { current: false } => {
+                let songs = self.list_songs_in_items(false);
+                add_to_liked_songs(ctx, move |client| {
+                    Ok(songs(client)?.into_iter().map(|song| song.file).collect())
+                });
+            }
             CommonAction::Sort { by } => self.change_sort(Some(by), ctx)?,
             CommonAction::ReverseSort => self.change_sort(None, ctx)?,
             CommonAction::Up => {
@@ -647,10 +663,6 @@ where
             }
             CommonAction::Select => {
                 self.stack_mut().current_mut().toggle_mark_selected();
-                self.stack_mut()
-                    .current_mut()
-                    .next(ctx.config.scrolloff, ctx.config.wrap_navigation);
-                self.fetch_data_internal(ctx);
                 ctx.render()?;
             }
             CommonAction::Close if !self.stack().current().marked().is_empty() => {
@@ -957,10 +969,7 @@ where
 
     fn open_context_menu(&mut self, ctx: &Ctx) -> Result<()> {
         let context = self.sort_context();
-        let list_songs_in_items = self
-            .items(false)
-            .map(|(_, item)| self.list_songs_in_item(item.to_owned()))
-            .collect_vec();
+        let list_songs = self.list_songs_in_items(false);
 
         let modal = MenuModal::new(ctx)
             .list_section(ctx, |mut section| {
@@ -984,7 +993,7 @@ where
                     });
                 }
 
-                let songs_in_items_clone = list_songs_in_items.clone();
+                let playlist_songs = list_songs.clone();
                 let initial_playlist_name = self.initial_playlist_name(false);
                 section.add_item("Create playlist", move |ctx| {
                     modal!(
@@ -997,13 +1006,7 @@ where
                             .on_confirm(move |ctx, value| {
                                 let value = value.to_owned();
                                 ctx.command(move |client| {
-                                    let items: Vec<_> = songs_in_items_clone
-                                        .into_iter()
-                                        .map(|cb| -> Result<_> { cb(client) })
-                                        .collect::<Result<Vec<Vec<_>>>>()?
-                                        .into_iter()
-                                        .flatten()
-                                        .collect();
+                                    let items = playlist_songs(client)?;
                                     client.create_playlist(
                                         &value,
                                         items.into_iter().map(|s| s.file).collect(),
@@ -1017,16 +1020,16 @@ where
                     Ok(())
                 });
 
-                add_song_save_actions(&mut section, ctx, move |client: &mut Client<'_>| {
-                    let items: Vec<_> = list_songs_in_items
-                        .into_iter()
-                        .map(|cb| -> Result<_> { cb(client) })
-                        .collect::<Result<Vec<Vec<_>>>>()?
-                        .into_iter()
-                        .flatten()
-                        .collect();
+                add_song_collection_actions(&mut section, ctx, move |client: &mut Client<'_>| {
+                    let items = list_songs(client)?;
                     Ok(items.into_iter().map(|song| song.file).collect())
                 });
+
+                if let Some(item) = self.stack().current().selected() {
+                    for (kind, value) in self.library_targets(item) {
+                        add_saved_library_actions(&mut section, ctx, kind, value);
+                    }
+                }
 
                 Some(section)
             })
@@ -1045,43 +1048,6 @@ where
                         });
                     }
                 }
-
-                if section.items.is_empty() {
-                    None
-                } else {
-                    Some(section)
-                }
-            })
-            .list_section(ctx, |mut section| {
-                // TODO Deletion cannot be currently done as we need to clear the marked items
-                // after the deletion occurs but do not have access to the pane's state in the
-                // callback. An event should be dispatched upon deletion to clear the items or
-                // better yet, the marked items need to be refactored directly into the
-                // `DirStackItem` directly.
-
-                // if !to_delete.is_empty() {
-                //     section.add_item("Delete", move |ctx| {
-                //         if !to_delete.is_empty() {
-                //             ctx.command(move |client| {
-                //                 client.delete_multiple(to_delete)?;
-                //                 Ok(())
-                //             });
-                //         }
-                //         Ok(())
-                //     });
-                // }
-                //
-                // if !all_to_delete.is_empty() {
-                //     section.add_item("Delete all", move |ctx| {
-                //         if !all_to_delete.is_empty() {
-                //             ctx.command(move |client| {
-                //                 client.delete_multiple(all_to_delete)?;
-                //                 Ok(())
-                //             });
-                //         }
-                //         Ok(())
-                //     });
-                // }
 
                 if section.items.is_empty() {
                     None

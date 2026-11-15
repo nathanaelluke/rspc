@@ -6,7 +6,7 @@ use ratatui::{Frame, prelude::Rect, widgets::ListState};
 use super::Pane;
 use crate::{
     MpdQueryResult,
-    config::tabs::PaneType,
+    config::{keys::CommonAction, tabs::PaneType},
     ctx::Ctx,
     mpd::{
         client::Client,
@@ -20,6 +20,7 @@ use crate::{
         dir_or_song::DirOrSong,
         dirstack::{DirStack, DirStackItem},
         input::InputResultEvent,
+        modals::menu::remove_from_liked_songs,
         widgets::browser::{Browser, BrowserArea},
     },
 };
@@ -57,12 +58,19 @@ impl DirectoriesPane {
         }
     }
 
-    fn request_root(&self, ctx: &Ctx) {
+    fn is_liked_songs(&self) -> bool {
+        self.root == Some("Liked Songs")
+            || self.rspc && matches!(self.stack.path().as_slice(), [root] if root == "Liked Songs")
+    }
+
+    fn request_library(&self, ctx: &Ctx) {
         let sort = ctx.config.directories_sort.clone();
         let playlist_display_mode = ctx.config.show_playlists_in_browser;
-        let root = self.root;
+        let path =
+            (self.root.is_none() && self.is_liked_songs()).then(|| self.stack.path().clone());
+        let root = self.root.or(path.as_ref().map(|_| "Liked Songs"));
         ctx.query()
-            .id(INIT)
+            .id(if path.is_some() { FETCH_DATA } else { INIT })
             .replace_id(INIT)
             .target(self.target.clone())
             .query(move |client| {
@@ -74,7 +82,7 @@ impl DirectoriesPane {
                 if root.is_none() {
                     data.sort_by(|a, b| a.with_custom_sort(&sort).cmp(&b.with_custom_sort(&sort)));
                 }
-                Ok(MpdQueryResult::DirOrSong { data, path: None })
+                Ok(MpdQueryResult::DirOrSong { data, path })
             });
     }
 
@@ -88,6 +96,10 @@ impl DirectoriesPane {
 }
 
 impl Pane for DirectoriesPane {
+    fn prefetch(&mut self, _area: Rect, ctx: &Ctx) -> Result<()> {
+        self.before_show(ctx)
+    }
+
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> anyhow::Result<()> {
         self.restore_sort(ctx);
         self.browser
@@ -99,7 +111,7 @@ impl Pane for DirectoriesPane {
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
         if !self.initialized {
             self.rspc = ctx.supported_commands.contains("rspc_identity");
-            self.request_root(ctx);
+            self.request_library(ctx);
             self.initialized = true;
         }
 
@@ -109,7 +121,7 @@ impl Pane for DirectoriesPane {
     fn on_event(&mut self, event: &mut UiEvent, _is_visible: bool, ctx: &Ctx) -> Result<()> {
         match event {
             UiEvent::Database => {
-                self.request_root(ctx);
+                self.request_library(ctx);
             }
             UiEvent::Reconnected => {
                 self.initialized = false;
@@ -130,6 +142,20 @@ impl Pane for DirectoriesPane {
     }
 
     fn handle_action(&mut self, event: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
+        if self.is_liked_songs() {
+            match event.claim_common() {
+                Some(CommonAction::Delete) => {
+                    let paths = self
+                        .items(false)
+                        .filter_map(|(_, item)| item.as_song().map(|song| song.file.clone()))
+                        .collect();
+                    remove_from_liked_songs(ctx, paths)?;
+                    return Ok(());
+                }
+                Some(_) => event.abandon(),
+                None => {}
+            }
+        }
         self.handle_common_action(event, ctx)?;
         self.handle_global_action(event, ctx)?;
         Ok(())
@@ -172,6 +198,7 @@ impl BrowserPane<DirOrSong> for DirectoriesPane {
         }
         match self.stack.path().as_slice() {
             [root, playlist] if root == "Playlists" => Some(format!("playlist:{playlist}")),
+            [root, album] if root == "Albums" => Some(format!("album:{album}")),
             [root] if root == "Liked Songs" => Some("library:liked".into()),
             _ => None,
         }
@@ -180,6 +207,7 @@ impl BrowserPane<DirOrSong> for DirectoriesPane {
         let selected = self.stack.current().selected()?;
         match self.stack.path().as_slice() {
             [root] if root == "Playlists" => Some(format!("playlist:{}", selected.as_path())),
+            [root] if root == "Albums" => Some(format!("album:{}", selected.as_path())),
             [] if selected.as_path() == "Liked Songs" => Some("library:liked".into()),
             _ => None,
         }

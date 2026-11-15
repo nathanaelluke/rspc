@@ -26,21 +26,15 @@
             ]),
         ),
         (
-            name: "Directories",
-            pane: Split(direction: Vertical, panes: [
-                (size: "100%", pane: Pane(Directories)),
-            ]),
-        ),
-        (
             name: "Artists",
             pane: Split(direction: Vertical, panes: [
                 (size: "100%", pane: Pane(Artists)),
             ]),
         ),
         (
-            name: "Album Artists",
+            name: "Liked Songs",
             pane: Split(direction: Vertical, panes: [
-                (size: "100%", pane: Pane(AlbumArtists)),
+                (size: "100%", pane: Pane(LikedSongs)),
             ]),
         ),
         (
@@ -56,15 +50,15 @@
             ]),
         ),
         (
-            name: "Search",
+            name: "Directories",
             pane: Split(direction: Vertical, panes: [
-                (size: "100%", pane: Pane(Search)),
+                (size: "100%", pane: Pane(Directories)),
             ]),
         ),
         (
-            name: "Liked Songs",
+            name: "Search",
             pane: Split(direction: Vertical, panes: [
-                (size: "100%", pane: Pane(LikedSongs)),
+                (size: "100%", pane: Pane(Search)),
             ]),
         ),
     ],

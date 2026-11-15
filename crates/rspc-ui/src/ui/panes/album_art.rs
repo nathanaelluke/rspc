@@ -63,14 +63,34 @@ impl AlbumArtPane {
             let result = client.find_album_art(&song_uri, order)?;
             log::debug!(elapsed:? = start.elapsed(), size = result.as_ref().map(|v|v.len()); "Found album art");
 
-            Ok(MpdQueryResult::AlbumArt(result))
+            Ok(MpdQueryResult::AlbumArt { song: song_uri, data: result })
         });
 
         Some(())
     }
+
+    fn prepare_art(&mut self, ctx: &Ctx) -> Result<()> {
+        let song = ctx
+            .find_current_song_in_queue()
+            .map(|(_, song)| song.file.clone());
+        if !self.fetch_needed && self.song_file == song && self.album_art.has_current() {
+            return self.album_art.prepare_current(ctx);
+        }
+        self.song_file = song;
+        self.fetch_needed = Self::fetch_album_art(ctx).is_some();
+        if !self.fetch_needed {
+            self.album_art.prepare_default(ctx)?;
+        }
+        Ok(())
+    }
 }
 
 impl Pane for AlbumArtPane {
+    fn prefetch(&mut self, area: Rect, ctx: &Ctx) -> Result<()> {
+        self.album_art.set_size(area);
+        self.prepare_art(ctx)
+    }
+
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()> {
         self.album_art.set_size(area);
         self.album_art.render(frame.buffer_mut(), ctx);
@@ -95,16 +115,9 @@ impl Pane for AlbumArtPane {
     }
 
     fn before_show(&mut self, ctx: &Ctx) -> Result<()> {
-        let song = ctx
-            .find_current_song_in_queue()
-            .map(|(_, song)| song.file.clone());
-        if !self.fetch_needed && self.song_file == song && self.album_art.has_current() {
-            return self.album_art.show_current(ctx);
-        }
-        self.song_file = song;
-        self.fetch_needed = AlbumArtPane::fetch_album_art(ctx).is_some();
+        self.prepare_art(ctx)?;
         if !self.fetch_needed {
-            self.album_art.show_default(ctx)?;
+            self.album_art.show_current(ctx)?;
         }
         Ok(())
     }
@@ -116,17 +129,23 @@ impl Pane for AlbumArtPane {
         is_visible: bool,
         ctx: &Ctx,
     ) -> Result<()> {
-        if !is_visible {
-            return Ok(());
-        }
         match (id, data) {
-            (ALBUM_ART, MpdQueryResult::AlbumArt(Some(data))) => {
+            (ALBUM_ART, MpdQueryResult::AlbumArt { song, data }) => {
+                if self.song_file.as_deref() != Some(song.as_str())
+                    || ctx
+                        .find_current_song_in_queue()
+                        .map(|(_, song)| song.file.as_str())
+                        != Some(song.as_str())
+                {
+                    return Ok(());
+                }
                 self.fetch_needed = false;
-                self.album_art.show(data, ctx)?;
-            }
-            (ALBUM_ART, MpdQueryResult::AlbumArt(None)) => {
-                self.fetch_needed = false;
-                self.album_art.show_default(ctx)?;
+                match (data, is_visible) {
+                    (Some(data), true) => self.album_art.show(data, ctx)?,
+                    (Some(data), false) => self.album_art.prepare(data, ctx)?,
+                    (None, true) => self.album_art.show_default(ctx)?,
+                    (None, false) => self.album_art.prepare_default(ctx)?,
+                }
             }
             _ => {}
         }
@@ -135,9 +154,12 @@ impl Pane for AlbumArtPane {
 
     fn on_event(&mut self, event: &mut UiEvent, is_visible: bool, ctx: &Ctx) -> Result<()> {
         match event {
-            UiEvent::SongChanged | UiEvent::Reconnected if is_visible => {
+            UiEvent::SongChanged | UiEvent::Reconnected => {
                 self.fetch_needed = true;
-                self.before_show(ctx)?;
+                self.prepare_art(ctx)?;
+                if is_visible && !self.fetch_needed {
+                    self.album_art.show_current(ctx)?;
+                }
             }
             UiEvent::Displayed if is_visible => {
                 self.album_art.redraw_current(ctx)?;
@@ -197,6 +219,95 @@ mod tests {
             panes::{Pane, album_art::ALBUM_ART},
         },
     };
+
+    #[rstest]
+    fn song_changes_fetch_covers_while_the_queue_is_hidden(
+        mut ctx: crate::ctx::Ctx,
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        ctx.client_request_sender = client_request_channel.0;
+        std::sync::Arc::make_mut(&mut ctx.config).album_art.method = ImageMethod::Block;
+        ctx.queue.push(Song {
+            id: 1,
+            file: "new-song.flac".into(),
+            ..Song::default()
+        });
+        ctx.status.songid = Some(1);
+        ctx.status.state = State::Play;
+        let mut pane = AlbumArtPane::new(&ctx);
+        pane.on_event(&mut crate::ui::UiEvent::SongChanged, false, &ctx)
+            .expect("prepare hidden cover");
+        assert!(matches!(
+            client_request_channel.1.try_recv(),
+            Ok(ClientRequest::Query(MpdQuery { id: ALBUM_ART, .. }))
+        ));
+    }
+
+    #[rstest]
+    fn a_hidden_cover_result_is_prepared_before_the_first_visit(
+        mut ctx: crate::ctx::Ctx,
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+    ) {
+        ctx.work_sender = work_request_channel.0;
+        std::sync::Arc::make_mut(&mut ctx.config).album_art.method = ImageMethod::Block;
+        let mut pane = AlbumArtPane::new(&ctx);
+        ctx.queue.push(Song {
+            id: 1,
+            file: "cover-test.flac".into(),
+            ..Song::default()
+        });
+        ctx.status.songid = Some(1);
+        ctx.status.state = State::Play;
+        pane.song_file = Some("cover-test.flac".into());
+        pane.calculate_areas(ratatui::layout::Rect::new(0, 0, 20, 10), &ctx)
+            .unwrap();
+        pane.on_query_finished(
+            ALBUM_ART,
+            crate::MpdQueryResult::AlbumArt {
+                song: "cover-test.flac".into(),
+                data: None,
+            },
+            false,
+            &ctx,
+        )
+        .unwrap();
+        assert!(!pane.fetch_needed);
+        assert!(pane.album_art.has_current());
+        assert!(matches!(
+            work_request_channel.1.try_recv(),
+            Ok(WorkRequest::ResizeImage(_))
+        ));
+    }
+
+    #[rstest]
+    fn late_artwork_for_a_previous_song_does_not_replace_the_current_cover(
+        mut ctx: crate::ctx::Ctx,
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+    ) {
+        ctx.work_sender = work_request_channel.0;
+        ctx.queue.push(Song {
+            id: 1,
+            file: "current.flac".into(),
+            ..Song::default()
+        });
+        ctx.status.songid = Some(1);
+        ctx.status.state = State::Play;
+        let mut pane = AlbumArtPane::new(&ctx);
+        pane.song_file = Some("current.flac".into());
+        pane.on_query_finished(
+            ALBUM_ART,
+            crate::MpdQueryResult::AlbumArt {
+                song: "previous.flac".into(),
+                data: None,
+            },
+            false,
+            &ctx,
+        )
+        .unwrap();
+        assert!(pane.fetch_needed);
+        assert!(!pane.album_art.has_current());
+        assert!(work_request_channel.1.is_empty());
+    }
 
     #[rstest]
     #[case(ImageMethod::Kitty, true)]
@@ -321,8 +432,16 @@ mod tests {
         // A request that has not completed may have failed. Returning must retry.
         pane.before_show(&ctx).expect("retry incomplete query");
         assert_eq!(queries.try_iter().count(), 1);
-        pane.on_query_finished(ALBUM_ART, crate::MpdQueryResult::AlbumArt(None), true, &ctx)
-            .expect("completed query");
+        pane.on_query_finished(
+            ALBUM_ART,
+            crate::MpdQueryResult::AlbumArt {
+                song: "cover-test.flac".into(),
+                data: None,
+            },
+            true,
+            &ctx,
+        )
+        .expect("completed query");
         pane.before_show(&ctx).expect("reuse completed art query");
         assert_eq!(queries.try_iter().count(), 0);
     }

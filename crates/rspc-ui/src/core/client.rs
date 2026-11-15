@@ -354,10 +354,6 @@ fn check_connection(
         // empty the work queue after reconnect as they might no longer be
         // relevant
         let _ = client_rx.try_iter().collect::<Vec<_>>();
-        try_skip!(
-            event_tx.send(AppEvent::Reconnected),
-            "Failed to send reconnected event"
-        );
         if let Err(err) = client.set_read_timeout(Some(config.mpd_read_timeout)) {
             log::error!(error:? = err; "Failed to set read timeout");
             return false;
@@ -366,6 +362,13 @@ fn check_connection(
             log::error!(error:? = err; "Failed to set write timeout");
             return false;
         }
+        try_skip!(
+            event_tx.send(AppEvent::Reconnected {
+                version: client.version(),
+                commands: client.supported_commands.clone(),
+            }),
+            "Failed to send reconnected event"
+        );
         true
     } else {
         false
@@ -388,5 +391,84 @@ fn handle_client_request(client: &mut Client<'_>, request: ClientRequest) -> Res
             query.tx.send(result)?;
             Ok(WorkDone::None)
         }
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+    use crate::config::address::MpdAddress;
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::net::UnixListener,
+    };
+
+    #[test]
+    fn reconnect_reports_the_new_servers_capabilities() {
+        let directory = tempfile::tempdir().expect("socket directory");
+        let path = directory.path().join("mpd.sock");
+        let listener = UnixListener::bind(&path).expect("listen");
+        let server = std::thread::spawn(move || {
+            for (version, commands) in [
+                ("0.23.5", "command: getvol\n"),
+                (
+                    "0.24.0",
+                    "command: getvol\ncommand: rspc_library_add\ncommand: sticker\n",
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().expect("client");
+                writeln!(stream, "OK MPD {version}").expect("greeting");
+                let mut reader = BufReader::new(stream.try_clone().expect("read stream"));
+                for _ in 0..2 {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).expect("command") > 0);
+                    if line.trim() == "commands" {
+                        writeln!(stream, "{commands}OK").expect("capabilities");
+                    } else {
+                        assert!(
+                            line.starts_with("binarylimit "),
+                            "unexpected request: {line}"
+                        );
+                        stream.write_all(b"OK\n").expect("command accepted");
+                    }
+                }
+            }
+        });
+        let mut client = Client::init(
+            MpdAddress::SocketPath(path.to_string_lossy().into_owned()),
+            None,
+            "reconnect-test",
+            None,
+            false,
+        )
+        .expect("initial connection");
+        assert_eq!(client.version.minor, 23);
+        assert!(!client.supported_commands.contains("rspc_library_add"));
+        let (_request_tx, request_rx) = crossbeam::channel::unbounded();
+        let (event_tx, event_rx) = crossbeam::channel::unbounded();
+        let config = Config {
+            mpd_read_timeout: Duration::from_secs(1),
+            mpd_write_timeout: Duration::from_secs(1),
+            ..Config::default()
+        };
+        assert!(check_connection(
+            false,
+            &mut client,
+            &request_rx,
+            &event_tx,
+            &config
+        ));
+        match event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reconnected event")
+        {
+            AppEvent::Reconnected { version, commands } => {
+                assert_eq!(version.minor, 24);
+                assert!(commands.contains("rspc_library_add"));
+                assert!(commands.contains("sticker"));
+            }
+            event => panic!("expected refreshed server capabilities, got {event:?}"),
+        }
+        server.join().expect("server completed");
     }
 }

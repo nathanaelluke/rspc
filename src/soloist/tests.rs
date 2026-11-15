@@ -633,3 +633,61 @@ async fn websocket_controls_wait_for_ack_and_receive_state() {
     assert!(commands.iter().any(|c| c == "play"));
     assert!(commands.iter().any(|c| c == "seek"));
 }
+
+#[test]
+fn recommendations_after_natural_end_do_not_take_over_the_rspc_queue() {
+    let mut state = playing();
+    state.position = state.duration;
+    state.at = None;
+    let ended = state.event(&json!({"type":"playback_changed","status":"paused"}));
+    assert!(
+        ended
+            .iter()
+            .any(|event| matches!(event, AudioEvent::Ended { request: 7 }))
+    );
+    for event in [
+        json!({"type":"track_changed","item":{"uri":"spotify:track:recommendation"}}),
+        json!({"type":"playback_changed","status":"playing"}),
+        json!({"type":"playback_state","status":"playing","is_active":true,"item":{"uri":"spotify:track:recommendation"},"position":{"position_ms":0,"speed":1.0}}),
+    ] {
+        assert!(
+            !state
+                .event(&event)
+                .iter()
+                .any(|event| matches!(event, AudioEvent::ExternalState { .. }))
+        );
+    }
+    assert_eq!(
+        state.request, 7,
+        "queue ownership must survive automatic recommendations"
+    );
+}
+
+#[test]
+fn finishing_queue_accepts_the_next_local_track_and_a_later_explicit_remote_resume() {
+    let mut state = playing();
+    state.position = state.duration;
+    state.at = None;
+    state.event(&json!({"type":"track_changed","item":{"uri":"spotify:track:recommendation"}}));
+    state.reserve("spotify:track:b", 8);
+    let events = state.event(&json!({"type":"playback_state","status":"playing","is_active":true,"item":{"uri":"spotify:track:b"}}));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AudioEvent::State { request: 8, .. }))
+    );
+
+    state.duration = 1000;
+    state.position = 1000;
+    state.at = None;
+    state.event(&json!({"type":"playback_changed","status":"idle"}));
+    state.manual_pause = true;
+    state.event(&json!({"type":"playback_changed","status":"paused"}));
+    let events =
+        state.event(&json!({"type":"track_changed","item":{"uri":"spotify:track:remote"}}));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AudioEvent::ExternalState { .. }))
+    );
+}

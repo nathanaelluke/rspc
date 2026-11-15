@@ -7,7 +7,7 @@ use crossterm::{
     queue,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
 };
-use image::DynamicImage;
+use image::{Rgba, RgbaImage};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color as RatatuiColor};
 
 use super::Backend;
@@ -27,46 +27,60 @@ pub struct Block;
 #[derive(derive_more::Debug)]
 pub struct Data {
     #[debug(skip)]
-    image: DynamicImage,
+    cells: Vec<[Rgba<u8>; 2]>,
     aligned_area: AlignedArea,
 }
 
-impl Block {
-    /// Render into the terminal frame so popups can cover individual cells.
-    pub fn render(buffer: &mut Buffer, data: &Data) {
-        let image = data.image.to_rgba8();
-        let area = data.aligned_area.area;
-        // Some terminals do not report pixel dimensions. In that case, map
-        // the decoded image across the available cells instead of sampling 0x0.
-        let cell_width = if data.aligned_area.cell_width_px > 0.0 {
-            data.aligned_area.cell_width_px
+impl Data {
+    fn new(image: &RgbaImage, aligned_area: AlignedArea) -> Self {
+        let area = aligned_area.area;
+        // Terminals without pixel dimensions still need the image mapped to cells.
+        let cell_width = if aligned_area.cell_width_px > 0.0 {
+            aligned_area.cell_width_px
         } else {
             f64::from(image.width()) / f64::from(area.width.max(1))
         };
-        let cell_height = if data.aligned_area.cell_height_px > 0.0 {
-            data.aligned_area.cell_height_px / 2.0
+        let cell_height = if aligned_area.cell_height_px > 0.0 {
+            aligned_area.cell_height_px / 2.0
         } else {
             f64::from(image.height()) / (2.0 * f64::from(area.height.max(1)))
         };
+        let cells = area
+            .positions()
+            .map(|position| {
+                let x = (f64::from(position.x - area.x) * cell_width) as u32;
+                let y = f64::from(position.y - area.y) * 2.0 * cell_height;
+                let sample = |y| {
+                    average_region_pixel(
+                        image,
+                        x,
+                        y,
+                        (cell_width as u32).max(1),
+                        (cell_height as u32).max(1),
+                        image.width(),
+                        image.height(),
+                    )
+                };
+                [sample(y as u32), sample((y + cell_height) as u32)]
+            })
+            .collect();
+        Self {
+            cells,
+            aligned_area,
+        }
+    }
+}
+
+impl Block {
+    /// Render prepared cells into the frame so popups can cover individual cells.
+    pub fn render(buffer: &mut Buffer, data: &Data) {
+        let area = data.aligned_area.area;
         let truecolor = truecolor_available();
         for position in area.intersection(*buffer.area()).positions() {
-            let x = (f64::from(position.x - area.x) * cell_width) as u32;
-            let y = (f64::from(position.y - area.y) * 2.0 * cell_height) as u32;
-            let sample = |y| {
-                average_region_pixel(
-                    &image,
-                    x,
-                    y,
-                    (cell_width as u32).max(1),
-                    (cell_height as u32).max(1),
-                    image.width(),
-                    image.height(),
-                )
-            };
-            let top = sample(y);
-            let bottom =
-                sample((f64::from(position.y - area.y) * 2.0 * cell_height + cell_height) as u32);
-            let color = |pixel: image::Rgba<u8>| {
+            let index = usize::from(position.y - area.y) * usize::from(area.width)
+                + usize::from(position.x - area.x);
+            let [top, bottom] = data.cells[index];
+            let color = |pixel: Rgba<u8>| {
                 if truecolor {
                     RatatuiColor::Rgb(pixel[0], pixel[1], pixel[2])
                 } else {
@@ -95,55 +109,20 @@ impl Backend for Block {
 
     fn display(&mut self, w: &mut impl Write, data: &Self::EncodedData, _ctx: &Ctx) -> Result<()> {
         queue!(w, SavePosition)?;
-        let img = &data.image;
-        let resized_area = data.aligned_area;
-
-        let img_buffer = img.to_rgba8();
-        let area = &resized_area.area;
-
-        let (img_width, img_height) = img_buffer.dimensions();
-        let cell_width = resized_area.cell_width_px;
-        let cell_height = resized_area.cell_height_px / 2.0;
-
+        let area = data.aligned_area.area;
+        let truecolor = truecolor_available();
         for term_y in 0..area.height {
             queue!(w, MoveTo(area.x, area.y + term_y))?;
-
             for term_x in 0..area.width {
-                let pixel_x = term_x as f64 * cell_width;
-
-                let top_pixel_row = term_y as f64 * 2.0 * cell_height;
-                let bottom_pixel_row = top_pixel_row + cell_height;
-
-                let top_pixel = average_region_pixel(
-                    &img_buffer,
-                    pixel_x as u32,
-                    top_pixel_row as u32,
-                    cell_width as u32,
-                    cell_height as u32,
-                    img_width,
-                    img_height,
-                );
-                let bottom_pixel = average_region_pixel(
-                    &img_buffer,
-                    pixel_x as u32,
-                    bottom_pixel_row as u32,
-                    cell_width as u32,
-                    cell_height as u32,
-                    img_width,
-                    img_height,
-                );
-
-                let top_color = color_from_pixel(top_pixel);
-                let bottom_color = color_from_pixel(bottom_pixel);
-
+                let index = usize::from(term_y) * usize::from(area.width) + usize::from(term_x);
+                let [top, bottom] = data.cells[index];
                 queue!(
                     w,
-                    SetForegroundColor(bottom_color),
-                    SetBackgroundColor(top_color),
+                    SetForegroundColor(color_from_pixel(bottom, truecolor)),
+                    SetBackgroundColor(color_from_pixel(top, truecolor)),
                     Print(LOWER_HALF_BLOCK)
                 )?;
             }
-
             queue!(w, ResetColor)?;
         }
 
@@ -161,10 +140,7 @@ impl Backend for Block {
         valign: VerticalAlign,
     ) -> Result<Self::EncodedData> {
         let (img, resized_area) = resize_image(image_data, area, max_size, halign, valign)?;
-        Ok(Data {
-            image: img,
-            aligned_area: resized_area,
-        })
+        Ok(Data::new(&img.into_rgba8(), resized_area))
     }
 }
 
@@ -237,8 +213,8 @@ fn truecolor_available() -> bool {
 }
 
 #[inline]
-fn color_from_pixel(pixel: image::Rgba<u8>) -> Color {
-    if truecolor_available() {
+fn color_from_pixel(pixel: image::Rgba<u8>, truecolor: bool) -> Color {
+    if truecolor {
         Color::Rgb {
             r: pixel[0],
             g: pixel[1],
@@ -256,13 +232,9 @@ mod tests {
 
     #[test]
     fn popup_covers_only_overlapping_art_and_closing_restores_it() {
-        let data = Data {
-            image: DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-                4,
-                4,
-                image::Rgba([200, 100, 20, 255]),
-            )),
-            aligned_area: AlignedArea {
+        let data = Data::new(
+            &image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 100, 20, 255])),
+            AlignedArea {
                 area: Rect::new(0, 0, 4, 2),
                 size_px: Size {
                     width: 4,
@@ -271,7 +243,7 @@ mod tests {
                 cell_width_px: 1.0,
                 cell_height_px: 2.0,
             },
-        };
+        );
         let mut terminal = Terminal::new(TestBackend::new(4, 2)).expect("terminal");
         let render = |frame: &mut ratatui::Frame, popup| {
             Block::render(frame.buffer_mut(), &data);
@@ -290,13 +262,9 @@ mod tests {
 
     #[test]
     fn renders_when_terminal_pixel_dimensions_are_unavailable() {
-        let data = Data {
-            image: DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-                4,
-                4,
-                image::Rgba([255, 255, 255, 255]),
-            )),
-            aligned_area: AlignedArea {
+        let data = Data::new(
+            &image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255])),
+            AlignedArea {
                 area: Rect::new(0, 0, 4, 2),
                 size_px: Size {
                     width: 4,
@@ -305,7 +273,7 @@ mod tests {
                 cell_width_px: 0.0,
                 cell_height_px: 0.0,
             },
-        };
+        );
         let mut buffer = Buffer::empty(data.aligned_area.area);
         Block::render(&mut buffer, &data);
         assert_ne!(buffer[(0, 0)].fg, RatatuiColor::Indexed(16));

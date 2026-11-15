@@ -43,6 +43,13 @@ impl Catalog {
         *self.playlist_fetched.lock().await = Some(std::time::Instant::now());
         Ok(names)
     }
+    async fn playlist_id(self: &Arc<Self>, name: &str) -> Result<String> {
+        self.playlist_names()
+            .await?
+            .get(name)
+            .cloned()
+            .context("playlist not found")
+    }
     pub async fn playlist_tracks(self: &Arc<Self>, name: &str) -> Result<Vec<TrackInfo>> {
         if let Some(name) = name.strip_prefix(local::PLAYLISTS) {
             return Ok(self.remember(self.local.playlist(name).await?).await);
@@ -56,12 +63,7 @@ impl Catalog {
                 .cloned()
                 .context("playlist not found");
         }
-        let id = self
-            .playlist_names()
-            .await?
-            .get(name)
-            .cloned()
-            .context("playlist not found")?;
+        let id = self.playlist_id(name).await?;
         Ok(self
             .playlist_view(&format!("playlists/{id}/tracks"))
             .await?
@@ -111,12 +113,7 @@ impl Catalog {
                 .filter_map(|(p, t)| t.uri.map(|u| (p, u)))
                 .collect());
         }
-        let id = self
-            .playlist_names()
-            .await?
-            .get(name)
-            .cloned()
-            .context("playlist not found")?;
+        let id = self.playlist_id(name).await?;
         Ok(self
             .pages(&format!("playlists/{id}/tracks"))
             .await?
@@ -154,7 +151,7 @@ impl Catalog {
             "Spotify playlists accept Spotify tracks only"
         );
         if self.demo {
-            let track = self
+            let mut track = self
                 .resolve(uri)
                 .await?
                 .into_iter()
@@ -164,15 +161,11 @@ impl Catalog {
             let tracks = playlists.get_mut(name).context("playlist not found")?;
             let at = position.unwrap_or(tracks.len());
             ensure!(at <= tracks.len(), "playlist position out of range");
+            track.added_at = Some(chrono::Utc::now());
             tracks.insert(at, track);
             return Ok(());
         }
-        let id = self
-            .playlist_names()
-            .await?
-            .get(name)
-            .cloned()
-            .context("playlist not found")?;
+        let id = self.playlist_id(name).await?;
         let position = if let Some(position) = position {
             let positions = self.playlist_positions(name).await?;
             ensure!(
@@ -228,12 +221,7 @@ impl Catalog {
                 .drain(start..end);
             return Ok(());
         }
-        let id = self
-            .playlist_names()
-            .await?
-            .get(name)
-            .cloned()
-            .context("playlist not found")?;
+        let id = self.playlist_id(name).await?;
         crate::spotify::edit_playlist(
             &id,
             crate::spotify::PlaylistChange::Remove {
@@ -273,12 +261,7 @@ impl Catalog {
             tracks.splice(at..at, moving);
             return Ok(());
         }
-        let id = self
-            .playlist_names()
-            .await?
-            .get(name)
-            .cloned()
-            .context("playlist not found")?;
+        let id = self.playlist_id(name).await?;
         let entries = positions[from..end].to_vec();
         let remaining: Vec<_> = positions[..from].iter().chain(&positions[end..]).collect();
         let to = remaining.get(to).map_or_else(
@@ -305,12 +288,7 @@ impl Catalog {
                 .clear();
             return Ok(());
         }
-        let id = self
-            .playlist_names()
-            .await?
-            .get(name)
-            .cloned()
-            .context("playlist not found")?;
+        let id = self.playlist_id(name).await?;
         crate::spotify::edit_playlist(&id, crate::spotify::PlaylistChange::Clear).await?;
         self.playlist_changed(Some(&id)).await
     }
@@ -337,12 +315,7 @@ impl Catalog {
             playlists.insert(new.into(), tracks);
             return Ok(());
         }
-        let id = self
-            .playlist_names()
-            .await?
-            .get(name)
-            .cloned()
-            .context("playlist not found")?;
+        let id = self.playlist_id(name).await?;
         crate::spotify::edit_playlist(&id, crate::spotify::PlaylistChange::Rename(new.into()))
             .await?;
         self.playlist_changed(Some(&id)).await
@@ -362,12 +335,7 @@ impl Catalog {
                 .context("playlist not found")?;
             return Ok(());
         }
-        let id = self
-            .playlist_names()
-            .await?
-            .get(name)
-            .cloned()
-            .context("playlist not found")?;
+        let id = self.playlist_id(name).await?;
         crate::spotify::remove_playlist(&id).await?;
         self.playlist_changed(Some(&id)).await
     }

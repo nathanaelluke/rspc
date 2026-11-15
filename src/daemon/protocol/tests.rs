@@ -80,6 +80,8 @@ async fn liking_a_song_updates_the_library_without_disturbing_playback() {
     track.uri = Some("spotify:track:unliked-demo".into());
     track.name = "An unliked demo song".into();
     engine.catalog.remember(vec![track]).await;
+    let mut events = engine.events.subscribe();
+    events.borrow_and_update();
     assert!(COMMANDS.contains(&"rspc_library_add"));
     assert_eq!(
         execute(
@@ -89,6 +91,21 @@ async fn liking_a_song_updates_the_library_without_disturbing_playback() {
         .await
         .unwrap(),
         b"library_added: 1\n",
+    );
+    assert!(
+        events.has_changed().unwrap(),
+        "the UI must be notified immediately"
+    );
+    assert!(events.borrow_and_update().contains_key("database"));
+    execute(
+        &engine,
+        &words("rspc_library_add spotify:track:unliked-demo").unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !events.has_changed().unwrap(),
+        "unchanged likes must not reload the library"
     );
     let liked = execute(&engine, &words("listallinfo \"Liked Songs\"").unwrap())
         .await
@@ -106,6 +123,146 @@ async fn liking_a_song_updates_the_library_without_disturbing_playback() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn saving_albums_and_following_artists_refresh_the_library_only() {
+    let (_dir, engine) = fixture().await;
+    execute(&engine, &words("playid 1").unwrap()).await.unwrap();
+    let queue = execute(&engine, &words("playlistinfo").unwrap())
+        .await
+        .unwrap();
+    let playlist = execute(&engine, &words("listplaylistinfo \"Demo Mix\"").unwrap())
+        .await
+        .unwrap();
+    let mut events = engine.events.subscribe();
+    for uri in ["spotify:album:demo-album", "spotify:artist:demo-artist"] {
+        for action in ["remove", "save"] {
+            events.borrow_and_update();
+            let command = words(&format!("rspc_library_update {uri} {action}")).unwrap();
+            assert_eq!(
+                execute(&engine, &command).await.unwrap(),
+                b"library_updated: 1\n"
+            );
+            assert!(events.borrow_and_update().contains_key("database"));
+            let items = engine
+                .catalog
+                .library_items("track", "spotify:track:demo1")
+                .await
+                .unwrap();
+            assert_eq!(
+                items.iter().find(|item| item.uri == uri).unwrap().saved,
+                action == "save"
+            );
+            assert_eq!(
+                execute(&engine, &command).await.unwrap(),
+                b"library_updated: 0\n"
+            );
+            assert!(!events.has_changed().unwrap());
+        }
+    }
+    assert!(
+        execute(
+            &engine,
+            &words("rspc_library_update mpd:file.flac save").unwrap()
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        execute(
+            &engine,
+            &words("rspc_library_update spotify:album:demo-album invalid").unwrap()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        execute(&engine, &words("playlistinfo").unwrap())
+            .await
+            .unwrap(),
+        queue
+    );
+    assert_eq!(
+        execute(&engine, &words("listplaylistinfo \"Demo Mix\"").unwrap())
+            .await
+            .unwrap(),
+        playlist
+    );
+    assert_eq!(engine.catalog.liked().await.unwrap().len(), 3);
+    let state = engine.playback().await;
+    assert!(state.playing);
+    assert_eq!(state.entry.unwrap().id, 1);
+}
+
+#[tokio::test]
+async fn unliking_a_song_refreshes_the_library_and_preserves_queue_and_playlists() {
+    let (_dir, engine) = fixture().await;
+    execute(&engine, &words("playid 1").unwrap()).await.unwrap();
+    let queue = execute(&engine, &words("playlistinfo").unwrap())
+        .await
+        .unwrap();
+    let playlist = execute(&engine, &words("listplaylistinfo \"Demo Mix\"").unwrap())
+        .await
+        .unwrap();
+    let mut events = engine.events.subscribe();
+    assert!(COMMANDS.contains(&"rspc_library_remove"));
+    assert!(
+        execute(
+            &engine,
+            &words("rspc_library_remove spotify:track:demo1 mpd:file.flac").unwrap()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(engine.catalog.liked().await.unwrap().len(), 3);
+    assert_eq!(
+        execute(
+            &engine,
+            &words(
+                "rspc_library_remove spotify:track:demo1 spotify:track:demo1 spotify:track:missing"
+            )
+            .unwrap()
+        )
+        .await
+        .unwrap(),
+        b"library_removed: 1\n"
+    );
+    assert!(events.has_changed().unwrap());
+    assert!(events.borrow_and_update().contains_key("database"));
+    assert_eq!(
+        execute(
+            &engine,
+            &words("rspc_library_remove spotify:track:demo1").unwrap()
+        )
+        .await
+        .unwrap(),
+        b"library_removed: 0\n"
+    );
+    assert!(!events.has_changed().unwrap());
+    let liked = execute(&engine, &words("listallinfo \"Liked Songs\"").unwrap())
+        .await
+        .unwrap();
+    assert!(
+        !String::from_utf8(liked)
+            .unwrap()
+            .contains("spotify:track:demo1")
+    );
+    assert_eq!(
+        execute(&engine, &words("playlistinfo").unwrap())
+            .await
+            .unwrap(),
+        queue
+    );
+    assert_eq!(
+        execute(&engine, &words("listplaylistinfo \"Demo Mix\"").unwrap())
+            .await
+            .unwrap(),
+        playlist
+    );
+    let playback = engine.playback().await;
+    assert!(playback.playing);
+    assert_eq!(playback.entry.unwrap().id, 1);
 }
 
 #[tokio::test]

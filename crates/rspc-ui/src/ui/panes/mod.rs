@@ -286,6 +286,11 @@ pub(crate) use pane_call;
 pub(crate) trait Pane {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Result<()>;
 
+    /// Prepare data for a configured pane without making it visible.
+    fn prefetch(&mut self, area: Rect, ctx: &Ctx) -> Result<()> {
+        Ok(())
+    }
+
     /// For any cleanup operations, ran when the screen hides
     fn on_hide(&mut self, ctx: &Ctx) -> Result<()> {
         Ok(())

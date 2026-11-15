@@ -19,6 +19,11 @@ pub struct Song {
 }
 
 impl Song {
+    pub fn same_album(&self, other: &Self) -> bool {
+        self.metadata.get("album") == other.metadata.get("album")
+            && self.metadata.get("albumartist") == other.metadata.get("albumartist")
+    }
+
     pub fn samplerate(&self) -> Option<u32> {
         self.metadata.get("format").and_then(|audio| {
             audio

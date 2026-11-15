@@ -2,6 +2,7 @@ pub mod artist_albums;
 pub mod current_song;
 pub mod decoders;
 pub mod idle;
+pub mod library;
 pub mod list;
 pub mod list_all;
 pub mod list_files;

@@ -458,7 +458,7 @@ fn main_task<B: Backend + std::io::Write>(
                                 ctx.find_current_song_in_queue().map(|(_, song)| song.id);
                             let previous_state = ctx.status.state;
                             let current_updating_db = ctx.status.updating_db;
-                            let sort_context = ctx.status.lastloadedplaylist.take();
+                            let current_playlist = ctx.status.lastloadedplaylist.take();
                             let previous_status = std::mem::replace(&mut ctx.status, status);
                             let new_playlist = ctx.status.lastloadedplaylist.as_ref();
                             let mut song_changed = false;
@@ -468,11 +468,11 @@ fn main_task<B: Backend + std::io::Write>(
                             {
                                 // Try to reflect changes to saved playlist if any was loaded both
                                 // before and after the update
-                                if let (Some(sort_context), Some(new_playlist)) =
-                                    (sort_context, new_playlist)
-                                    && &sort_context == new_playlist
+                                if let (Some(current_playlist), Some(new_playlist)) =
+                                    (current_playlist, new_playlist)
+                                    && &current_playlist == new_playlist
                                 {
-                                    let playlist_name = sort_context.clone();
+                                    let playlist_name = current_playlist.clone();
                                     ctx.command(move |client| {
                                         client.save_queue_as_playlist(
                                             &playlist_name,
@@ -695,12 +695,13 @@ fn main_task<B: Backend + std::io::Write>(
                         }
                     }
                 }
-                AppEvent::Reconnected => {
+                AppEvent::Reconnected { version, commands } => {
+                    ctx.update_server_capabilities(version, commands);
                     for ev in [IdleEvent::Player, IdleEvent::Playlist, IdleEvent::Options] {
                         handle_idle_event(ev, &ctx, &mut additional_evs);
                     }
                     if let Err(err) = ui.on_event(UiEvent::Reconnected, &mut ctx) {
-                        log::error!(error:? = err, event:?; "UI failed to handle resize event");
+                        log::error!(error:? = err; "UI failed to handle reconnection");
                     }
                     status_warn!("rspc reconnected to MPD and will reinitialize");
                     connected = true;

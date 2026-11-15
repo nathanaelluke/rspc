@@ -25,6 +25,15 @@ use crate::{
     shared::mpd_query::PreviewGroup,
 };
 
+pub(crate) fn marker_span(ctx: &Ctx, marked: bool) -> Span<'static> {
+    let theme = &ctx.config.theme;
+    if marked {
+        Span::styled(theme.symbols.marker.clone(), theme.highlighted_item_style)
+    } else {
+        Span::default()
+    }
+}
+
 pub trait DirStackItem {
     fn as_song(&self) -> Option<&Song> {
         None
@@ -100,14 +109,7 @@ impl DirStackItem for DirOrSong {
                 ..
             } => {
                 let config = &ctx.config;
-                let marker_span = if is_marked {
-                    Span::styled(
-                        config.theme.symbols.marker.clone(),
-                        config.theme.highlighted_item_style,
-                    )
-                } else {
-                    Span::from(" ".repeat(config.theme.symbols.marker.chars().count()))
-                };
+                let marker_span = marker_span(ctx, is_marked);
                 let mut value = Line::from(vec![
                     marker_span,
                     if *is_playlist {
@@ -175,14 +177,7 @@ impl DirStackItem for Song {
         additional_content: Option<String>,
     ) -> ListItem<'a> {
         let config = &ctx.config;
-        let marker_span = if is_marked {
-            Span::styled(
-                config.theme.symbols.marker.clone(),
-                config.theme.highlighted_item_style,
-            )
-        } else {
-            Span::from(" ".repeat(config.theme.symbols.marker.chars().count()))
-        };
+        let marker_span = marker_span(ctx, is_marked);
 
         let spans = [
             marker_span,
@@ -286,14 +281,7 @@ impl DirStackItem for String {
         _additional_content: Option<String>,
     ) -> ListItem<'a> {
         let config = &ctx.config;
-        let marker_span = if is_marked {
-            Span::styled(
-                config.theme.symbols.marker.clone(),
-                config.theme.highlighted_item_style,
-            )
-        } else {
-            Span::from(" ".repeat(config.theme.symbols.marker.chars().count()))
-        };
+        let marker_span = marker_span(ctx, is_marked);
 
         if matches_filter {
             ListItem::new(Line::from(vec![marker_span, Span::from(self.clone())]))

@@ -1081,26 +1081,6 @@ impl Default for TabsFile {
                 },
             },
             TabFile {
-                name: "Directories".to_string(),
-                border_type: BorderTypeFile::None,
-                pane: PaneOrSplitFile::Split {
-                    borders: BordersFile::NONE,
-                    direction: DirectionFile::Vertical,
-                    panes: vec![SubPaneFile {
-                        size: "100%".to_string(),
-                        background_color: None,
-                        borders: BordersFile::ALL,
-                        border_style: None,
-                        border_active_style: None,
-                        border_title: Vec::new(),
-                        border_title_position: BorderTitlePosition::Top,
-                        border_title_alignment: Alignment::Left,
-                        border_symbols: BorderSymbolsFile::Rounded,
-                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Directories),
-                    }],
-                },
-            },
-            TabFile {
                 name: "Artists".to_string(),
                 border_type: BorderTypeFile::None,
                 pane: PaneOrSplitFile::Split {
@@ -1121,24 +1101,9 @@ impl Default for TabsFile {
                 },
             },
             TabFile {
-                name: "Album Artists".to_string(),
+                name: "Liked Songs".to_owned(),
                 border_type: BorderTypeFile::None,
-                pane: PaneOrSplitFile::Split {
-                    borders: BordersFile::NONE,
-                    direction: DirectionFile::Vertical,
-                    panes: vec![SubPaneFile {
-                        size: "100%".to_string(),
-                        background_color: None,
-                        borders: BordersFile::ALL,
-                        border_style: None,
-                        border_active_style: None,
-                        border_title: Vec::new(),
-                        border_title_position: BorderTitlePosition::Top,
-                        border_title_alignment: Alignment::Left,
-                        border_symbols: BorderSymbolsFile::Rounded,
-                        pane: PaneOrSplitFile::Pane(PaneTypeFile::AlbumArtists),
-                    }],
-                },
+                pane: PaneOrSplitFile::Pane(PaneTypeFile::LikedSongs),
             },
             TabFile {
                 name: "Albums".to_string(),
@@ -1181,6 +1146,26 @@ impl Default for TabsFile {
                 },
             },
             TabFile {
+                name: "Directories".to_string(),
+                border_type: BorderTypeFile::None,
+                pane: PaneOrSplitFile::Split {
+                    borders: BordersFile::NONE,
+                    direction: DirectionFile::Vertical,
+                    panes: vec![SubPaneFile {
+                        size: "100%".to_string(),
+                        background_color: None,
+                        borders: BordersFile::ALL,
+                        border_style: None,
+                        border_active_style: None,
+                        border_title: Vec::new(),
+                        border_title_position: BorderTitlePosition::Top,
+                        border_title_alignment: Alignment::Left,
+                        border_symbols: BorderSymbolsFile::Rounded,
+                        pane: PaneOrSplitFile::Pane(PaneTypeFile::Directories),
+                    }],
+                },
+            },
+            TabFile {
                 name: "Search".to_string(),
                 border_type: BorderTypeFile::None,
                 pane: PaneOrSplitFile::Split {
@@ -1199,11 +1184,6 @@ impl Default for TabsFile {
                         pane: PaneOrSplitFile::Pane(PaneTypeFile::Search),
                     }],
                 },
-            },
-            TabFile {
-                name: "Liked Songs".to_owned(),
-                border_type: BorderTypeFile::None,
-                pane: PaneOrSplitFile::Pane(PaneTypeFile::LikedSongs),
             },
         ])
     }

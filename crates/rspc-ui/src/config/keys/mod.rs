@@ -136,7 +136,7 @@ impl Default for KeyConfigFile {
             (s().char('/'),                       C::EnterSearch),
             (s().char('n'),                       C::NextResult),
             (s().char('N'),                       C::PreviousResult),
-            (s().char(' '),                       C::Select),
+            (s().char('m'),                       C::Select),
             (s().char(' ').ctrl(),                C::InvertSelection),
             (s().char('a'),                       C::Add),
             (s().char('A'),                       C::AddAll),
@@ -147,6 +147,8 @@ impl Default for KeyConfigFile {
             (s().char('z').ctrl(),                C::ContextMenu {}),
             (s().char('s').ctrl().char('s'),      C::Save { kind: SaveKind::Modal { all: false, duplicates_strategy: DuplicateStrategy::Ask } }),
             (s().char('s').ctrl().char('a'),      C::Save { kind: SaveKind::Modal { all: true, duplicates_strategy: DuplicateStrategy::Ask } }),
+            (s().char('s').ctrl().char('l'),      C::AddToLikedSongs { current: false }),
+            (s().char('s').ctrl().char('L'),      C::AddToLikedSongs { current: true }),
             (s().char('r'),                       C::Rate { kind: RateKind::default(), current: false, min_rating: 0, max_rating: 10 }),
         ]);
 
@@ -330,7 +332,7 @@ mod tests {
             clear: false,
             global: HashMap::from([
                 (Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), GlobalActionFile::Quit),
-                (Key { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE }.into(), GlobalActionFile::TogglePause),
+                (Key { key: KeyCode::Char('m'), modifiers: KeyModifiers::NONE }.into(), GlobalActionFile::TogglePause),
             ]),
             queue: HashMap::from([(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), QueueActionsFile::Play),
                                   (Key { key: KeyCode::Char('b'), modifiers: KeyModifiers::SHIFT, }.into(), QueueActionsFile::JumpToCurrent)]),
@@ -351,9 +353,9 @@ mod tests {
         #[cfg(debug_assertions)]
         default.logs.insert(Key { key: KeyCode::Char('a'), modifiers: KeyModifiers::CONTROL, }.into(), LogsActions::Clear);
 
-        // <Space> is mapped in global keys, it has to remove the default `Select` mapping from navigation keys
-        default.global.insert(Key { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE, }.into(), GlobalAction::TogglePause);
-        default.navigation.remove(&Key { key: KeyCode::Char(' '), modifiers: KeyModifiers::NONE, }.into());
+        // m is mapped in global keys, it has to remove the default `Select` mapping from navigation keys
+        default.global.insert(Key { key: KeyCode::Char('m'), modifiers: KeyModifiers::NONE, }.into(), GlobalAction::TogglePause);
+        default.navigation.remove(&Key { key: KeyCode::Char('m'), modifiers: KeyModifiers::NONE, }.into());
 
         let result: KeyConfig = input.try_into().unwrap();
 

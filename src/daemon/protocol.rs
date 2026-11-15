@@ -51,6 +51,9 @@ const COMMANDS: &[&str] = &[
     "rspc_artist_albums",
     "rspc_selection_info",
     "rspc_library_add",
+    "rspc_library_remove",
+    "rspc_library_items",
+    "rspc_library_update",
     "rspc_diagnostics",
     "rspc_pair",
     "rspc_login",
@@ -279,9 +282,38 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
     let command = arg(args, 0)?;
     let text = match command {
         "ping" | "password" | "binarylimit" | "noidle" => String::new(),
-        "rspc_library_add" => {
-            let added = engine.catalog.add_liked(&args[1..]).await?;
-            format!("library_added: {added}\n")
+        "rspc_library_add" | "rspc_library_remove" => {
+            let (count, label) = if command == "rspc_library_add" {
+                (engine.catalog.add_liked(&args[1..]).await?, "added")
+            } else {
+                (engine.catalog.remove_liked(&args[1..]).await?, "removed")
+            };
+            if count > 0 {
+                engine.changed(vec!["database"]);
+            }
+            format!("library_{label}: {count}\n")
+        }
+        "rspc_library_items" => {
+            let items = engine
+                .catalog
+                .library_items(arg(args, 1)?, arg(args, 2)?)
+                .await?;
+            format!("library_items: {}\n", serde_json::to_string(&items)?)
+        }
+        "rspc_library_update" => {
+            let remove = match arg(args, 2)? {
+                "save" => false,
+                "remove" => true,
+                _ => bail!("Expected save or remove"),
+            };
+            let count = engine
+                .catalog
+                .update_saved_item(arg(args, 1)?, remove)
+                .await?;
+            if count > 0 {
+                engine.changed(vec!["database"]);
+            }
+            format!("library_updated: {count}\n")
         }
         "rspc_selection_info" => {
             let info = engine

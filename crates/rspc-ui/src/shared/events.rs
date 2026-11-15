@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
 
 use anyhow::Result;
 use crossterm::event::KeyEvent;
@@ -18,7 +18,7 @@ use crate::{
         tabs::PaneType,
         theme::UiConfig,
     },
-    mpd::{QueuePosition, commands::IdleEvent},
+    mpd::{QueuePosition, commands::IdleEvent, version::Version},
     shared::{
         keys::ActionEvent,
         lrc::LrcMetadata,
@@ -128,7 +128,10 @@ pub(crate) enum AppEvent {
     },
     WorkDone(Result<WorkDone>),
     UiEvent(UiAppEvent),
-    Reconnected,
+    Reconnected {
+        version: Version,
+        commands: HashSet<String>,
+    },
     LostConnection,
     TmuxHook {
         hook: String,

@@ -10,12 +10,14 @@ use ratatui::{
     symbols::border,
     widgets::{Block, Borders, Clear},
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::{
     Section, SectionType, input_section::InputSection, list_section::ListSection,
     multi_action_section::MultiActionSection,
 };
 use crate::{
+    MpdQueryResult,
     config::keys::CommonAction,
     ctx::Ctx,
     shared::{
@@ -48,6 +50,15 @@ impl Modal for MenuModal<'_> {
     }
 
     fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
+        let mut changed = false;
+        for (index, section) in self.sections.iter_mut().enumerate() {
+            if let SectionType::Menu(section) = section {
+                changed |= super::library::start_loading(section, ctx, self.id, index);
+            }
+        }
+        if changed {
+            self.refresh_labels();
+        }
         let needed_height: usize = self
             .sections
             .iter()
@@ -236,11 +247,11 @@ impl Modal for MenuModal<'_> {
             }
             MouseEventKind::DoubleClick => {
                 if let Some(idx) = self.section_idx_at_position(event.into()) {
-                    self.sections[idx].double_click(event.into(), ctx)?;
-                    if ctx.input.is_insert_mode() {
-                        ctx.render()?;
-                    } else {
+                    let close = self.sections[idx].double_click(event.into(), ctx)?;
+                    if close && !ctx.input.is_insert_mode() {
                         self.destroy(ctx)?;
+                    } else {
+                        ctx.render()?;
                     }
                 }
             }
@@ -257,6 +268,62 @@ impl Modal for MenuModal<'_> {
             MouseEventKind::Drag {
                 drag_start_position: _,
             } => {}
+        }
+        Ok(())
+    }
+    fn on_query_finished(
+        &mut self,
+        id: &'static str,
+        data: &mut MpdQueryResult,
+        ctx: &Ctx,
+    ) -> Result<()> {
+        if id != super::library::QUERY_ID {
+            return Ok(());
+        }
+        let MpdQueryResult::Any(data) = data else {
+            return Ok(());
+        };
+        let Some(data) = data.downcast_mut::<super::library::LibraryData>() else {
+            return Ok(());
+        };
+        if data.modal != self.id {
+            return Ok(());
+        }
+        if let Some(SectionType::Menu(section)) = self.sections.get_mut(data.section)
+            && super::library::apply(section, data, ctx)
+        {
+            self.refresh_labels();
+            if let Some(filter) = self.filter.as_ref() {
+                let matches = self.sections[self.current_section_idx]
+                    .selected()
+                    .and_then(|index| self.sections_labels[self.current_section_idx].get(index))
+                    .is_some_and(|label| label.contains(&filter.to_lowercase()));
+                if !matches {
+                    self.first_result(ctx);
+                }
+            }
+            ctx.render()?;
+        }
+        Ok(())
+    }
+
+    fn on_event(&mut self, event: &mut crate::ui::UiEvent, ctx: &Ctx) -> Result<()> {
+        if matches!(
+            event,
+            crate::ui::UiEvent::Database | crate::ui::UiEvent::Reconnected
+        ) {
+            let mut changed = false;
+            for section in &mut self.sections {
+                if let SectionType::Menu(section) = section
+                    && let Some(request) = &mut section.library
+                {
+                    request.reset();
+                    changed = true;
+                }
+            }
+            if changed {
+                ctx.render()?;
+            }
         }
         Ok(())
     }
@@ -286,7 +353,7 @@ impl<'a> MenuModal<'a> {
     }
 
     fn next_result(&mut self, ctx: &Ctx) {
-        let Some(filter) = self.filter.as_ref() else {
+        let Some(filter) = self.filter.as_deref().map(str::to_lowercase) else {
             return;
         };
 
@@ -300,7 +367,7 @@ impl<'a> MenuModal<'a> {
 
             for label_idx in start..sect.len() {
                 let label = &self.sections_labels[sect_i][label_idx];
-                if label.contains(filter) {
+                if label.contains(&filter) {
                     if sect_i != self.current_section_idx {
                         self.sections[self.current_section_idx].unselect(ctx);
                     }
@@ -316,7 +383,7 @@ impl<'a> MenuModal<'a> {
         let sect = &self.sections[self.current_section_idx];
         for label_idx in 0..sect.len() {
             let label = &self.sections_labels[self.current_section_idx][label_idx];
-            if label.contains(filter) {
+            if label.contains(&filter) {
                 self.sections[self.current_section_idx].select(label_idx);
                 break;
             }
@@ -324,7 +391,7 @@ impl<'a> MenuModal<'a> {
     }
 
     fn prev_result(&mut self, ctx: &mut Ctx) {
-        let Some(filter) = self.filter.as_ref() else {
+        let Some(filter) = self.filter.as_deref().map(str::to_lowercase) else {
             return;
         };
 
@@ -338,7 +405,7 @@ impl<'a> MenuModal<'a> {
 
             for label_idx in (0..end).rev() {
                 let label = &self.sections_labels[sect_i][label_idx];
-                if label.contains(filter) {
+                if label.contains(&filter) {
                     if sect_i != self.current_section_idx {
                         self.sections[self.current_section_idx].unselect(ctx);
                     }
@@ -354,7 +421,7 @@ impl<'a> MenuModal<'a> {
         let sect = &self.sections[self.current_section_idx];
         for label_idx in (0..sect.len()).rev() {
             let label = &self.sections_labels[self.current_section_idx][label_idx];
-            if label.contains(filter) {
+            if label.contains(&filter) {
                 self.sections[self.current_section_idx].select(label_idx);
                 break;
             }
@@ -362,14 +429,14 @@ impl<'a> MenuModal<'a> {
     }
 
     fn first_result(&mut self, ctx: &Ctx) {
-        let Some(filter) = self.filter.as_ref() else {
+        let Some(filter) = self.filter.as_deref().map(str::to_lowercase) else {
             return;
         };
 
         for sect_i in 0..self.sections_labels.len() {
             for label_idx in 0..self.sections_labels[sect_i].len() {
                 let label = &self.sections_labels[sect_i][label_idx];
-                if label.contains(filter) {
+                if label.contains(&filter) {
                     if sect_i != self.current_section_idx {
                         self.sections[self.current_section_idx].unselect(ctx);
                     }
@@ -386,7 +453,24 @@ impl<'a> MenuModal<'a> {
         self
     }
 
+    fn refresh_labels(&mut self) {
+        let label_width = self
+            .sections
+            .iter()
+            .flat_map(Section::item_labels_iter)
+            .map(|label| label.width().saturating_add(4).min(80) as u16)
+            .max()
+            .unwrap_or(0);
+        self.width = self.width.max(label_width);
+        self.sections_labels = self
+            .sections
+            .iter()
+            .map(|section| section.item_labels_iter().map(str::to_lowercase).collect())
+            .collect();
+    }
+
     pub fn build(mut self) -> Self {
+        self.refresh_labels();
         if let Some((i, s)) = self
             .sections
             .iter_mut()
@@ -396,13 +480,6 @@ impl<'a> MenuModal<'a> {
             self.current_section_idx = i;
             s.down();
         }
-        self.sections_labels =
-            self.sections
-                .iter()
-                .fold(Vec::<Vec<String>>::new(), |mut acc, s| {
-                    acc.push(s.item_labels_iter().map(|l| l.to_lowercase()).collect());
-                    acc
-                });
         self
     }
 
@@ -489,5 +566,42 @@ impl<'a> MenuModal<'a> {
             .enumerate()
             .find(|(_, a)| a.contains(position))
             .map(|(i, _)| i)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::fixtures::ctx;
+    use rstest::rstest;
+
+    #[rstest]
+    fn mixed_case_search_finds_and_cycles_matches_across_sections(mut ctx: Ctx) {
+        let mut modal = MenuModal::new(&ctx)
+            .list_section(&ctx, |mut section| {
+                section.add_item("Keep playing", |_| Ok(()));
+                section.add_item("Remove from Liked Songs", |_| Ok(()));
+                Some(section)
+            })
+            .list_section(&ctx, |mut section| {
+                section.add_item("Add to Liked Songs", |_| Ok(()));
+                Some(section)
+            })
+            .build();
+        modal.filter = Some("LiKeD SoNgS".into());
+        modal.first_result(&ctx);
+        assert_eq!(modal.current_section_idx, 0);
+        assert_eq!(modal.sections[0].selected(), Some(1));
+        modal.next_result(&ctx);
+        assert_eq!(modal.current_section_idx, 1);
+        assert_eq!(modal.sections[1].selected(), Some(0));
+        modal.next_result(&ctx);
+        assert_eq!(modal.current_section_idx, 0);
+        modal.prev_result(&mut ctx);
+        assert_eq!(modal.current_section_idx, 1);
+        modal.prev_result(&mut ctx);
+        assert_eq!(modal.current_section_idx, 0);
+        assert_eq!(modal.sections[0].selected(), Some(1));
+        assert_eq!(modal.filter.as_deref(), Some("LiKeD SoNgS"));
     }
 }

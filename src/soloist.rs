@@ -40,6 +40,7 @@ struct State {
     requested: String,
     confirmed: bool,
     ended: bool,
+    finishing: bool,
     manual_pause: bool,
     received_auth: bool,
     awaiting_play: bool,
@@ -55,6 +56,7 @@ impl State {
         self.requested = uri.into();
         self.confirmed = false;
         self.ended = false;
+        self.finishing = false;
         self.manual_pause = false;
         self.position = 0;
         self.at = Some(Instant::now());
@@ -131,13 +133,14 @@ impl State {
                 if old_duration > 0
                     && old_position.saturating_add((old_duration / 10).min(2000)) >= old_duration
                 {
+                    self.finishing = true;
                     out.push(AudioEvent::Ended {
                         request: self.request,
                     });
                 } else {
                     self.follow_external();
                 }
-            } else if track_changed && self.ended {
+            } else if track_changed && self.ended && !self.finishing {
                 self.follow_external();
             }
             self.uri = uri.to_owned();
@@ -184,7 +187,7 @@ impl State {
             }
         }
         if let Some(status) = v["status"].as_str() {
-            if self.ended && self.status == "paused" && status == "playing" {
+            if self.ended && !self.finishing && self.status == "paused" && status == "playing" {
                 // Playback resumed from Spotify after an MPD stop.
                 self.follow_external();
             }
@@ -195,6 +198,7 @@ impl State {
                 && old_position.saturating_add(250) >= old_duration
             {
                 self.ended = true;
+                self.finishing = true;
                 out.push(AudioEvent::Ended {
                     request: self.request,
                 });
@@ -207,6 +211,12 @@ impl State {
                 if status == "playing" {
                     self.speed = 1.0;
                 }
+            }
+            // A natural end may be followed by Spotify recommendation events
+            // before the daemon loads its next queue entry or pauses at the end.
+            // Only a confirmed pause completes that handoff.
+            if self.finishing && self.manual_pause && matches!(status, "paused" | "idle") {
+                self.finishing = false;
             }
             self.status = status.into();
             if status != "playing" {
@@ -246,6 +256,7 @@ impl State {
         self.requested.clear();
         self.confirmed = false;
         self.ended = false;
+        self.finishing = false;
         self.manual_pause = false;
     }
 }

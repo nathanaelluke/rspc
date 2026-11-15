@@ -701,11 +701,15 @@ impl<'ui> Ui<'ui> {
                 }
             }
         } else if let Some(action) = key.claim_common() {
-            #[allow(
-                clippy::collapsible_match,
-                reason = "Future expansion, remove when adding other actions"
-            )]
             match action {
+                CommonAction::AddToLikedSongs { current: true } => {
+                    if let Some((_, song)) = ctx.find_current_song_in_queue() {
+                        let path = song.file.clone();
+                        modals::menu::add_to_liked_songs(ctx, move |_| Ok(vec![path]));
+                    } else {
+                        status_warn!("No song is currently playing");
+                    }
+                }
                 CommonAction::Rate {
                     kind,
                     current: true,
@@ -836,7 +840,52 @@ impl<'ui> Ui<'ui> {
                 Ok(())
             },
             ctx,
-        )
+        )?;
+        self.prefetch_tabs(ctx)
+    }
+
+    fn prefetch_tabs(&mut self, ctx: &Ctx) -> Result<()> {
+        // Shared panes take their size from the visible layout. Only prepare
+        // inactive panes, and only once when several tabs contain the same pane.
+        let mut prepared = self
+            .layout
+            .panes_iter()
+            .map(|pane| pane.pane.clone())
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(tab) = self.tabs.get(&ctx.active_tab) {
+            prepared.extend(tab.panes.panes_iter().map(|pane| pane.pane.clone()));
+        }
+        let mut tab_area = None;
+        self.layout.for_each_pane(
+            self.area,
+            &mut |pane, area, _, _, _| {
+                if pane.pane == PaneType::TabContent {
+                    tab_area = Some(area);
+                }
+                Ok(())
+            },
+            ctx,
+        )?;
+        let Some(area) = tab_area else {
+            return Ok(());
+        };
+        for name in &ctx.config.tabs.names {
+            let Some(tab) = self.tabs.get(name) else {
+                continue;
+            };
+            tab.panes.for_each_pane(
+                area,
+                &mut |pane, area, _, _, _| {
+                    if prepared.insert(pane.pane.clone()) {
+                        let mut instance = self.panes.get_mut(&pane.pane, ctx)?;
+                        pane_call!(instance, prefetch(area, ctx))?;
+                    }
+                    Ok(())
+                },
+                ctx,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn on_ui_app_event(&mut self, event: UiAppEvent, ctx: &mut Ctx) -> Result<()> {
@@ -932,16 +981,20 @@ impl<'ui> Ui<'ui> {
                 Ok(())
             },
             ctx,
-        )
+        )?;
+        self.prefetch_tabs(ctx)
     }
 
     pub fn on_event(&mut self, mut event: UiEvent, ctx: &mut Ctx) -> Result<()> {
         match event {
             UiEvent::Database => {
                 ctx.input.clear_all_buffers();
-                status_warn!(
-                    "The music database has been updated. Some parts of the UI may have been reinitialized to prevent inconsistent behaviours."
-                );
+                ctx.liked_song_uris.borrow_mut().take();
+                if !ctx.supported_commands.contains("rspc_identity") {
+                    status_warn!(
+                        "The music database has been updated. Some parts of the UI may have been reinitialized to prevent inconsistent behaviours."
+                    );
+                }
             }
             UiEvent::ConfigChanged => {
                 // Call on_hide for all panes in the current tab and current layout because they

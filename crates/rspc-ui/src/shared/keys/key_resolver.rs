@@ -358,11 +358,52 @@ mod test {
             }
         }
         assert!(
-            ron::from_str::<crate::config::keys::GlobalActionFile>("SwitchToTabIndex(0)").is_err()
+            ron::from_str::<crate::config::keys::actions::GlobalActionFile>("SwitchToTabIndex(0)")
+                .is_err()
         );
         assert!(
-            matches!(crate::config::keys::GlobalAction::try_from(crate::config::keys::GlobalActionFile::SwitchToTab("Custom".into())), Ok(crate::config::keys::GlobalAction::SwitchToTab(name)) if name == crate::config::tabs::TabName::from("Custom"))
+            matches!(crate::config::keys::GlobalAction::from(crate::config::keys::actions::GlobalActionFile::SwitchToTab("Custom".into())), crate::config::keys::GlobalAction::SwitchToTab(name) if name == crate::config::tabs::TabName::from("Custom"))
         );
+    }
+
+    #[rstest]
+    #[case('l', false)]
+    #[case('L', true)]
+    fn liked_song_shortcuts_distinguish_selection_from_current_playback(
+        #[case] suffix: char,
+        #[case] current: bool,
+        app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+        client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
+    ) {
+        let ctx = ctx(
+            app_event_channel.clone(),
+            work_request_channel,
+            client_request_channel,
+        );
+        let resolver = KeyResolver::new(&ctx.config);
+        resolver.handle_key_event(
+            Key {
+                key: KeyCode::Char('s'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            &ctx,
+        );
+        assert!(app_event_channel.1.try_recv().is_err());
+        resolver.handle_key_event(
+            crossterm::event::KeyEvent::new(KeyCode::Char(suffix), KeyModifiers::NONE).into(),
+            &ctx,
+        );
+        let AppEvent::ActionResolved(ActionEvent { actions, .. }) = app_event_channel
+            .1
+            .recv_timeout(Duration::from_millis(100))
+            .expect("resolved shortcut")
+        else {
+            panic!("expected a resolved shortcut");
+        };
+        assert!(matches!(actions.as_slice(),
+            [Actions::Common(CommonAction::AddToLikedSongs { current: actual })] if *actual == current
+        ));
     }
 
     #[rstest]
