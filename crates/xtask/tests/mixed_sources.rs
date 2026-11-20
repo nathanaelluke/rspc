@@ -305,6 +305,28 @@ fn connect_reactivation_restores_song_and_notifies_ui_without_controls() -> Resu
 }
 
 #[test]
+fn switching_back_to_spotify_after_stop_keeps_the_local_volume() -> Result<()> {
+    let h = Harness::mixed()?;
+    h.raw("single 1")?;
+    h.raw("playid 1")?;
+    h.raw("setvol 23")?;
+    wait(|| Ok(h.spotify()["volume"] == 23))?;
+
+    h.raw("playid 4")?;
+    wait(|| Ok(state_is(&h.status()?, "play")))?;
+    assert!(h.mpd("status", "rspc")?.contains("volume: 23"));
+    h.raw("setvol 31")?;
+    h.raw("stop")?;
+    assert_eq!(h.status()?["volume"], 31);
+
+    h.raw("playid 3")?;
+    wait(|| Ok(h.spotify()["uri"] == "spotify:track:last"))?;
+    assert_eq!(h.spotify()["volume"], 31);
+    assert_eq!(h.status()?["volume"], 31);
+    Ok(())
+}
+
+#[test]
 fn controls_and_ui_exit_preserve_local_playback_and_handoff() -> Result<()> {
     let h = Harness::mixed()?;
     h.cli(&["play", "3"])?;

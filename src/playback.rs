@@ -1,6 +1,7 @@
 //! Events shared by the Spotify and MPD players.
 use crate::model::TrackInfo;
 use anyhow::{Result, bail};
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
@@ -57,7 +58,10 @@ pub enum AudioEvent {
     },
     Authenticated,
     Inactive,
-    Volume(u8),
+    Volume {
+        value: u8,
+        observed_at: Instant,
+    },
     LibraryChanged,
     Metadata {
         request: u64,

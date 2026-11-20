@@ -42,10 +42,20 @@ struct State {
     ended: bool,
     finishing: bool,
     manual_pause: bool,
+    volume: Option<u8>,
     received_auth: bool,
     awaiting_play: bool,
 }
 impl State {
+    fn volume_event(&mut self, snapshot: &Value) -> Option<AudioEvent> {
+        let value = snapshot["volume"].as_u64()?.min(100) as u8;
+        self.volume = Some(value);
+        Some(AudioEvent::Volume {
+            value,
+            observed_at: Instant::now(),
+        })
+    }
+
     fn position(&self) -> u64 {
         self.position.saturating_add(self.at.map_or(0, |at| {
             (at.elapsed().as_millis() as f64 * self.speed.max(0.0)) as u64
@@ -95,13 +105,9 @@ impl State {
             ));
             return out;
         }
-        if kind == "volume_changed" || kind == "playback_state" {
-            if let Some(n) = v["volume"].as_u64() {
-                out.push(AudioEvent::Volume(n.min(100) as u8));
-            }
-            if kind == "volume_changed" {
-                return out;
-            }
+        if kind == "volume_changed" {
+            out.extend(self.volume_event(v));
+            return out;
         }
         if (kind == "device_changed" || kind == "playback_state")
             && let Some(active) = v["is_active"].as_bool()
@@ -116,6 +122,10 @@ impl State {
         if self.awaiting_play {
             return out;
         }
+        let observe_volume = kind == "playback_state"
+            && (self.request == 0
+                || self.confirmed
+                || v["item"]["uri"].as_str() == Some(self.requested.as_str()));
         let old_position = self.position();
         let old_duration = self.duration;
         let mut track_changed = false;
@@ -248,6 +258,13 @@ impl State {
                 playing: self.status == "playing",
                 stopped: self.status == "idle",
             });
+        }
+        if observe_volume && let Some(update) = self.volume_event(v) {
+            if matches!(out.last(), Some(AudioEvent::ExternalState { .. })) {
+                out.push(update);
+            } else {
+                out.insert(0, update);
+            }
         }
         out
     }
@@ -762,7 +779,7 @@ impl Soloist {
         .await
         .context("Soloist did not acknowledge command")?
     }
-    pub async fn load(&self, uri: &str) -> Result<()> {
+    pub async fn load(&self, uri: &str, volume: Option<u8>) -> Result<()> {
         let (request, duration) = {
             let state = self.state.lock().unwrap();
             (state.request, state.duration)
@@ -784,6 +801,11 @@ impl Soloist {
                 self.configured.store(false, Ordering::Relaxed);
                 return Err(error);
             }
+        }
+        if let Some(volume) = volume
+            && (!active || self.state.lock().unwrap().volume != Some(volume))
+        {
+            self.volume(volume).await?;
         }
         {
             let mut state = self.state.lock().unwrap();

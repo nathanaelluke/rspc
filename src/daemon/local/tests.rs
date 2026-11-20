@@ -323,6 +323,7 @@ async fn first_local_load_preserves_requested_volume_after_reconnect() {
             ("addid \"next.flac\"", "Id: 1\nOK\n"),
             ("setvol 25", "OK\n"),
             ("play 0", "OK\n"),
+            ("status", "volume: 25\nstate: play\nOK\n"),
             ("ping", "OK\n"),
             ("status", "volume: 25\nstate: play\nelapsed: 1.000\nOK\n"),
             ("currentsong", "file: next.flac\nOK\n"),
@@ -423,6 +424,7 @@ async fn reconnecting_a_load_is_atomic_with_respect_to_the_idle_observer() {
     ] {
         commands.push((command, "OK\n"));
     }
+    commands.push(("status", "volume: 40\nstate: play\nOK\n"));
     for _ in 0..2 {
         commands.extend([
             ("ping", "OK\n"),
@@ -598,6 +600,7 @@ async fn check_load_volume(
     volume_before_play: Option<u8>,
     deferred: bool,
     position_ms: u64,
+    restores_old_volume: bool,
 ) {
     let (client, server) = UnixStream::pair().unwrap();
     let observed_volume = volume_before_play.unwrap_or(73);
@@ -648,6 +651,20 @@ async fn check_load_volume(
             format!("setvol {}", volume_before_play.unwrap()),
             "OK\n".into(),
         ));
+    }
+    if let Some(volume) = volume_before_play {
+        if restores_old_volume {
+            commands.extend([
+                ("status".into(), "state: play\nOK\n".into()),
+                ("status".into(), "volume: 64\nstate: play\nOK\n".into()),
+                (format!("setvol {volume}"), "OK\n".into()),
+            ]);
+        } else {
+            commands.push((
+                "status".into(),
+                format!("volume: {volume}\nstate: play\nOK\n"),
+            ));
+        }
     }
     commands.extend([
         ("ping".into(), "OK\n".into()),
@@ -703,23 +720,35 @@ async fn check_load_volume(
     task.await.unwrap();
     assert!(
         std::iter::from_fn(|| rx.try_recv().ok()).any(|update| update.epoch == 2
-            && matches!(update.event, AudioEvent::Volume(volume) if volume == observed_volume))
+            && matches!(update.event, AudioEvent::Volume { value, .. } if value == observed_volume))
     );
 }
 
 #[tokio::test]
 async fn first_local_load_defers_volume_until_hardware_mixer_opens() {
-    check_load_volume(None, Some(40), true, 0).await;
+    check_load_volume(None, Some(40), true, 0, false).await;
 }
 
 #[tokio::test]
 async fn local_track_changes_preserve_desktop_volume_and_resume_offset() {
-    check_load_volume(Some("volume: 73\nstate: pause\n"), Some(73), false, 1234).await;
+    check_load_volume(
+        Some("volume: 73\nstate: pause\n"),
+        Some(73),
+        false,
+        1234,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn natural_track_end_does_not_restore_stale_engine_volume() {
-    check_load_volume(Some("volume: -1\nstate: stop\n"), None, false, 0).await;
+    check_load_volume(Some("volume: -1\nstate: stop\n"), None, false, 0, false).await;
+}
+
+#[tokio::test]
+async fn startup_reapplies_volume_when_the_reopened_mixer_restores_an_old_level() {
+    check_load_volume(None, Some(40), false, 0, true).await;
 }
 
 #[test]

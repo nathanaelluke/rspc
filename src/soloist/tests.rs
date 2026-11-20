@@ -118,7 +118,7 @@ async fn seek_after_play_waits_for_the_selected_track_to_be_ready() {
     let soloist = Arc::new(Soloist::from_socket(1, socket, None, None, tx));
     authenticated(&soloist).await;
     soloist.reserve("spotify:track:test", 10_000).unwrap();
-    soloist.load("spotify:track:test").await.unwrap();
+    soloist.load("spotify:track:test", None).await.unwrap();
     let player = Arc::clone(&soloist);
     let seek = tokio::spawn(async move { player.seek(1000).await });
     tokio::time::sleep(Duration::from_millis(40)).await;
@@ -372,7 +372,11 @@ fn external_snapshot() -> Value {
 fn restored_and_phone_playback_emit_metadata_without_a_local_request() {
     let mut state = State::default();
     let events = state.event(&external_snapshot());
-    assert!(events.iter().any(|e| matches!(e, AudioEvent::Volume(40))));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AudioEvent::Volume { value: 40, .. }))
+    );
     let track = events
         .iter()
         .find_map(|e| match e {
@@ -575,7 +579,7 @@ async fn websocket_controls_wait_for_ack_and_receive_state() {
             let name = v["command"].as_str().unwrap();
             seen.push(name.to_owned());
             if name == "set_shuffle" {
-                socket.send(Message::Text(json!({"type":"playback_state","status":"playing","is_active":true,"item":{"uri":"spotify:track:test"}}).to_string().into())).await.unwrap();
+                socket.send(Message::Text(json!({"type":"playback_state","status":"playing","is_active":true,"volume":17,"item":{"uri":"spotify:track:test"}}).to_string().into())).await.unwrap();
             }
             if name == "set_repeat_context" {
                 socket.send(Message::Text(json!({"type":"track_changed","item":{"uri":"spotify:track:restored-context"}}).to_string().into())).await.unwrap();
@@ -610,13 +614,14 @@ async fn websocket_controls_wait_for_ack_and_receive_state() {
     }
     assert!(soloist.logged_in());
     let id = soloist.reserve("spotify:track:test", 10000).unwrap();
-    soloist.load("spotify:track:test").await.unwrap();
+    soloist.load("spotify:track:test", Some(31)).await.unwrap();
     loop {
         let AudioUpdate { epoch, event, .. } =
             tokio::time::timeout(Duration::from_secs(1), rx.recv())
                 .await
                 .unwrap()
                 .unwrap();
+        assert!(!matches!(event, AudioEvent::Volume { value: 17, .. }));
         if matches!(event,AudioEvent::State{request,playing:true,..}if request==id) {
             assert_eq!(epoch, 3);
             break;
@@ -626,10 +631,10 @@ async fn websocket_controls_wait_for_ack_and_receive_state() {
     soloist.volume(42).await.unwrap();
     soloist.pause().await.unwrap();
     let commands = server.await.unwrap();
-    assert!(
-        commands.iter().position(|c| c == "activate").unwrap()
-            < commands.iter().position(|c| c == "play").unwrap()
-    );
+    let activate = commands.iter().position(|c| c == "activate").unwrap();
+    let volume = commands.iter().position(|c| c == "set_volume").unwrap();
+    let play = commands.iter().position(|c| c == "play").unwrap();
+    assert!(activate < volume && volume < play);
     assert!(commands.iter().any(|c| c == "play"));
     assert!(commands.iter().any(|c| c == "seek"));
 }

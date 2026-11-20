@@ -269,7 +269,14 @@ async fn source_and_request_guards_keep_late_events_out_of_the_shared_player() {
         p.volume = 40;
     }
     engine
-        .audio_event(Backend::Spotify, 0, AudioEvent::Volume(100))
+        .audio_event(
+            Backend::Spotify,
+            0,
+            AudioEvent::Volume {
+                value: 100,
+                observed_at: Instant::now(),
+            },
+        )
         .await
         .unwrap();
     engine
@@ -353,6 +360,53 @@ fn external(track: crate::model::TrackInfo, playing: bool) -> AudioEvent {
     }
 }
 #[tokio::test]
+async fn mixer_reports_cannot_replace_a_newer_volume_or_change_it_while_stopped() {
+    let (_dir, engine) = fixture().await;
+    let now = Instant::now();
+    {
+        let mut player = engine.player.lock().await;
+        player.backend = Some(Backend::Spotify);
+        player.volume = 31;
+        player.volume_observed_at = Some(now);
+    }
+    engine
+        .soloist_event(
+            0,
+            AudioEvent::Volume {
+                value: 23,
+                observed_at: now - Duration::from_millis(1),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.playback().await.volume, 31);
+    engine
+        .soloist_event(
+            0,
+            AudioEvent::Volume {
+                value: 42,
+                observed_at: now + Duration::from_millis(1),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.playback().await.volume, 42);
+
+    engine.stop().await;
+    engine
+        .soloist_event(
+            0,
+            AudioEvent::Volume {
+                value: 23,
+                observed_at: now + Duration::from_millis(2),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.playback().await.volume, 42);
+}
+
+#[tokio::test]
 async fn initial_remote_snapshot_updates_real_mpd_status_and_preserves_the_queue() {
     let (dir, engine) = fixture().await;
     engine.soloist_epoch.store(1, Ordering::Relaxed);
@@ -362,7 +416,13 @@ async fn initial_remote_snapshot_updates_real_mpd_status_and_preserves_the_queue
     track.uri = Some("spotify:track:phone".into());
     track.name = "Phone song".into();
     engine
-        .soloist_event(1, AudioEvent::Volume(40))
+        .soloist_event(
+            1,
+            AudioEvent::Volume {
+                value: 40,
+                observed_at: Instant::now(),
+            },
+        )
         .await
         .unwrap();
     engine

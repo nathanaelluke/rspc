@@ -43,6 +43,7 @@ pub struct Player {
     external: bool,
     loading: Option<Instant>,
     shuffle: Option<Shuffle>,
+    volume_observed_at: Option<Instant>,
 }
 #[derive(Default)]
 struct Shuffle {
@@ -237,6 +238,7 @@ impl Engine {
                 external: false,
                 loading: None,
                 shuffle: None,
+                volume_observed_at: None,
             }),
             events,
             shutdown,
@@ -398,7 +400,7 @@ impl Engine {
     }
 
     async fn play_inner_at(&self, target: PlayTarget, position_ms: u64) -> Result<()> {
-        let (entry, sync_spotify_volume, volume) = {
+        let (entry, previous_backend, mut volume, volume_known) = {
             let p = self.player.lock().await;
             let index = target.index(&p.queue)?;
             (
@@ -407,10 +409,9 @@ impl Engine {
                     .get(index)
                     .context("queue position out of range")?
                     .clone(),
-                // Deferred paused selections have no active backend, but keep
-                // the shared volume when their replacement is finally loaded.
-                p.backend == Some(Backend::Mpd) || (!p.stopped && p.backend.is_none()),
+                p.backend,
                 p.volume,
+                p.volume_observed_at.is_some(),
             )
         };
         let uri = entry.track.uri.as_deref().context("track has no URI")?;
@@ -424,10 +425,12 @@ impl Engine {
                 Backend::Spotify => {
                     let player = self.soloist().await?;
                     let request = player.reserve(uri, entry.track.duration_ms)?;
-                    if sync_spotify_volume {
-                        player.volume(volume).await?;
-                    }
                     if let Some(local) = self.local_audio.read().await.as_ref() {
+                        if previous_backend == Some(Backend::Mpd)
+                            && let Some(latest) = local.mixer_volume().await
+                        {
+                            volume = latest;
+                        }
                         local.stop().await?;
                     }
                     soloist = Some(player);
@@ -463,10 +466,14 @@ impl Engine {
             p.external = false;
             p.backend = Some(backend);
             p.request = request;
+            if backend == Backend::Mpd || volume_known {
+                p.volume = volume;
+                p.volume_observed_at = Some(Instant::now());
+            }
         }
         if let Some(soloist) = soloist {
             let result = async {
-                soloist.load(uri).await?;
+                soloist.load(uri, volume_known.then_some(volume)).await?;
                 if position_ms > 0 {
                     soloist
                         .seek(position_ms.min(u32::MAX as u64) as u32)
@@ -655,13 +662,13 @@ impl Engine {
     }
     pub async fn volume(&self, value: i64, relative: bool) {
         let _control = self.control.lock().await;
-        let mut p = self.player.lock().await;
-        p.volume = value
-            .saturating_add(if relative { i64::from(p.volume) } else { 0 })
-            .clamp(0, 100) as u8;
-        let volume = p.volume;
-        let backend = p.backend;
-        drop(p);
+        let (volume, backend) = {
+            let p = self.player.lock().await;
+            let volume = value
+                .saturating_add(if relative { i64::from(p.volume) } else { 0 })
+                .clamp(0, 100) as u8;
+            (volume, p.backend)
+        };
         let result = if backend == Some(Backend::Mpd) {
             let local = self.local_audio.read().await.clone();
             match local {
@@ -675,9 +682,13 @@ impl Engine {
                 _ => Ok(()),
             }
         };
+        let mut p = self.player.lock().await;
+        p.volume = volume;
+        p.volume_observed_at = Some(Instant::now());
         if let Err(error) = result {
-            self.player.lock().await.error = error.to_string();
+            p.error = error.to_string();
         }
+        drop(p);
         self.changed(vec!["mixer"]);
     }
     pub async fn next(&self, previous: bool) -> Result<()> {
@@ -1093,10 +1104,16 @@ impl Engine {
                 drop(p);
                 self.changed(vec!["player"]);
             }
-            AudioEvent::Volume(value) => {
-                p.volume = value;
-                drop(p);
-                self.changed(vec!["mixer"]);
+            AudioEvent::Volume { value, observed_at }
+                if p.volume_observed_at
+                    .is_none_or(|last| p.backend == Some(backend) && observed_at >= last) =>
+            {
+                p.volume_observed_at = Some(observed_at);
+                if p.volume != value {
+                    p.volume = value;
+                    drop(p);
+                    self.changed(vec!["mixer"]);
+                }
             }
             _ => {}
         }

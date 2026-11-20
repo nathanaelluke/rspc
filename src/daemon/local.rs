@@ -231,6 +231,22 @@ impl Wire {
             }
         }
     }
+    async fn confirm_start_volume(&mut self, requested: u8) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            let status = fields(&self.command("status").await?);
+            if let Some(actual) = status_volume(&status) {
+                if actual != requested {
+                    self.volume(requested, true).await?;
+                }
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }
     async fn response(&mut self) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         loop {
@@ -276,6 +292,13 @@ fn fields(bytes: &[u8]) -> HashMap<String, String> {
         .lines()
         .filter_map(|l| l.split_once(": ").map(|(k, v)| (k.into(), v.into())))
         .collect()
+}
+fn status_volume(status: &HashMap<String, String>) -> Option<u8> {
+    status
+        .get("volume")?
+        .parse::<u8>()
+        .ok()
+        .map(|value| value.min(100))
 }
 fn outputs(bytes: &[u8]) -> Vec<HashMap<String, String>> {
     String::from_utf8_lossy(bytes)
@@ -896,10 +919,7 @@ impl Player {
         // made through the desktop. Read their live volume before stop closes
         // the mixer, rather than reapplying the engine's last observed value.
         let volume = if p.current.is_some() {
-            fields(&p.wire.command("status").await?)
-                .get("volume")
-                .and_then(|value| value.parse::<u8>().ok())
-                .map(|value| value.min(100))
+            status_volume(&fields(&p.wire.command("status").await?))
         } else {
             Some(volume)
         };
@@ -938,6 +958,9 @@ impl Player {
         if let Some(volume) = deferred_volume {
             p.wire.volume(volume, true).await?;
         }
+        if let Some(volume) = volume {
+            p.wire.confirm_start_volume(volume).await?;
+        }
         self.generation.store(request, Ordering::Relaxed);
         p.current = Some(format!("mpd:{file}"));
         p.observed = false;
@@ -951,6 +974,7 @@ impl Player {
             return Ok(());
         }
         self.ensure_connected(&mut p).await?;
+        let observed_at = Instant::now();
         let status = fields(&p.wire.command("status").await?);
         if let Some(error) = status.get("error").filter(|e| !e.is_empty()) {
             self.emit(request, AudioEvent::Error(error.clone()));
@@ -965,8 +989,8 @@ impl Player {
             }
             self.emit(request, AudioEvent::Metadata { request, track });
         }
-        if let Some(volume) = status.get("volume").and_then(|s| s.parse::<u8>().ok()) {
-            self.emit(request, AudioEvent::Volume(volume.min(100)));
+        if let Some(value) = status_volume(&status) {
+            self.emit(request, AudioEvent::Volume { value, observed_at });
         }
         let state = status.get("state").map(String::as_str).unwrap_or("stop");
         let position = status
@@ -1022,6 +1046,11 @@ impl Player {
         let mut p = self.state.lock().await;
         self.control(&mut p, &format!("setvol {volume}")).await?;
         Ok(())
+    }
+    pub async fn mixer_volume(&self) -> Option<u8> {
+        let mut p = self.state.lock().await;
+        p.current.as_ref()?;
+        status_volume(&fields(&p.wire.command("status").await.ok()?))
     }
     async fn control(&self, p: &mut PlayerState, command: &str) -> Result<()> {
         self.ensure_connected(p).await?;
