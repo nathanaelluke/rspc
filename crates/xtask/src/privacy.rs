@@ -84,6 +84,7 @@ pub fn check_file(path: &Path, data: &[u8]) -> Vec<Finding> {
                 "4a9872a79fd6df603cc0af0caa3611c583ad6832f2c1b161f45108e9c44ffe5a"
                     | "0824ae3a918355a3ab33f32de11d338c722f07ba070c744167243f6fe8c1eaac"
                     | "e3d899072488b222e306ecfdbc8190c6037cdfec4560967d615d4425c43d126d"
+                    | "3868b9dcd808c8eaef51e97867e1d2decb2829346205f21ab166fc84a601966d"
             ),
             _ => false,
         };
