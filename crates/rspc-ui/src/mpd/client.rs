@@ -224,7 +224,11 @@ impl<'name> Client<'name> {
         Ok(client)
     }
 
-    pub fn reconnect(&mut self) -> MpdResult<&Client<'_>> {
+    pub fn reconnect(
+        &mut self,
+        read_timeout: std::time::Duration,
+        write_timeout: std::time::Duration,
+    ) -> MpdResult<&Client<'_>> {
         debug!(name = self.name, addr:? = self.addr; "trying to reconnect");
         let mut stream = match &self.addr {
             MpdAddress::IpAndPort(addr) => TcpOrUnixStream::Tcp(TcpStream::connect(addr)?),
@@ -241,8 +245,8 @@ impl<'name> Client<'name> {
                 ));
             }
         };
-        stream.set_write_timeout(None)?;
-        stream.set_read_timeout(None)?;
+        stream.set_write_timeout(Some(write_timeout))?;
+        stream.set_read_timeout(Some(read_timeout))?;
         let mut rx = BufReader::new(stream.try_clone()?);
 
         let mut buf = String::new();

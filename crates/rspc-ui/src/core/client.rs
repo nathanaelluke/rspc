@@ -243,9 +243,9 @@ fn client_task(
                                     Err(err) => match err.downcast_ref::<MpdError>() {
                                         Some(MpdError::TimedOut(err)) => {
                                             status_error!(err:?; "Reading response from MPD timed out, will try to reconnect");
-                                            health!(client.reconnect(), "Failed to reconnect");
-                                            health!(client.set_write_timeout(Some(config.mpd_write_timeout)), "Failed to set write timeout");
+                                            health!(reconnect(&mut client, config), "Failed to reconnect");
                                             client_write = health!(client.stream.try_clone(), "Client write clone to succeed");
+                                            health!(notify_reconnected(&client, event_tx), "Failed to send reconnected event");
                                         },
                                         _ => {
                                             log::error!(error:? = err; "Failed to handle client request");
@@ -341,6 +341,19 @@ mod drop_guard {
     }
 }
 
+fn reconnect(client: &mut Client<'_>, config: &Config) -> Result<()> {
+    client.reconnect(config.mpd_read_timeout, config.mpd_write_timeout)?;
+    Ok(())
+}
+
+fn notify_reconnected(client: &Client<'_>, event_tx: &Sender<AppEvent>) -> Result<()> {
+    event_tx.send(AppEvent::Reconnected {
+        version: client.version,
+        commands: client.supported_commands.clone(),
+    })?;
+    Ok(())
+}
+
 fn check_connection(
     first_loop: bool,
     client: &mut Client<'_>,
@@ -350,23 +363,12 @@ fn check_connection(
 ) -> bool {
     if first_loop {
         true
-    } else if client.reconnect().is_ok() {
+    } else if reconnect(client, config).is_ok() {
         // empty the work queue after reconnect as they might no longer be
         // relevant
         let _ = client_rx.try_iter().collect::<Vec<_>>();
-        if let Err(err) = client.set_read_timeout(Some(config.mpd_read_timeout)) {
-            log::error!(error:? = err; "Failed to set read timeout");
-            return false;
-        }
-        if let Err(err) = client.set_write_timeout(Some(config.mpd_write_timeout)) {
-            log::error!(error:? = err; "Failed to set write timeout");
-            return false;
-        }
         try_skip!(
-            event_tx.send(AppEvent::Reconnected {
-                version: client.version(),
-                commands: client.supported_commands.clone(),
-            }),
+            notify_reconnected(client, event_tx),
             "Failed to send reconnected event"
         );
         true
@@ -397,14 +399,77 @@ fn handle_client_request(client: &mut Client<'_>, request: ClientRequest) -> Res
 #[cfg(test)]
 mod reconnect_tests {
     use super::*;
-    use crate::config::address::MpdAddress;
+    use crate::{config::address::MpdAddress, mpd::client::TcpOrUnixStream};
+    use rstest::rstest;
     use std::{
         io::{BufRead, BufReader},
         os::unix::net::UnixListener,
     };
 
-    #[test]
-    fn reconnect_reports_the_new_servers_capabilities() {
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn reconnect_times_out_during_initialization(#[case] after_greeting: bool) {
+        let directory = tempfile::tempdir().expect("socket directory");
+        let path = directory.path().join("mpd.sock");
+        let listener = UnixListener::bind(&path).expect("listen");
+        let (done_tx, done_rx) = bounded(0);
+        let server = std::thread::spawn(move || {
+            let (mut initial, _) = listener.accept().expect("initial client");
+            initial.write_all(b"OK MPD 0.24.0\n").expect("greeting");
+            let mut reader = BufReader::new(initial.try_clone().expect("initial read stream"));
+            for _ in 0..2 {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).expect("initial command") > 0);
+                if line.trim() == "commands" {
+                    initial
+                        .write_all(b"command: getvol\nOK\n")
+                        .expect("capabilities");
+                } else {
+                    assert!(line.starts_with("binarylimit "));
+                    initial.write_all(b"OK\n").expect("binary limit");
+                }
+            }
+            let (mut stalled, _) = listener.accept().expect("reconnecting client");
+            if after_greeting {
+                stalled.write_all(b"OK MPD 0.24.0\n").expect("new greeting");
+                let mut line = String::new();
+                BufReader::new(stalled.try_clone().expect("new read stream"))
+                    .read_line(&mut line)
+                    .expect("initialization request");
+                assert_eq!(line.trim(), "commands");
+            }
+            let _ = done_rx.recv_timeout(Duration::from_secs(2));
+            drop(stalled);
+        });
+        let mut client = Client::init(
+            MpdAddress::SocketPath(path.to_string_lossy().into_owned()),
+            None,
+            "stalled-reconnect-test",
+            None,
+            false,
+        )
+        .expect("initial connection");
+        let config = Config {
+            mpd_read_timeout: Duration::from_millis(30),
+            mpd_write_timeout: Duration::from_millis(30),
+            ..Config::default()
+        };
+        let started = std::time::Instant::now();
+        let error = reconnect(&mut client, &config).expect_err("stalled initialization");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(
+            error.downcast_ref::<MpdError>(),
+            Some(MpdError::TimedOut(_))
+        ));
+        done_tx.send(()).expect("release stalled connection");
+        server.join().expect("server completed");
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn reconnect_restores_timeouts_and_reports_capabilities(#[case] after_timeout: bool) {
         let directory = tempfile::tempdir().expect("socket directory");
         let path = directory.path().join("mpd.sock");
         let listener = UnixListener::bind(&path).expect("listen");
@@ -459,13 +524,29 @@ mod reconnect_tests {
             mpd_write_timeout: Duration::from_secs(1),
             ..Config::default()
         };
-        assert!(check_connection(
-            false,
-            &mut client,
-            &request_rx,
-            &event_tx,
-            &config
-        ));
+        if after_timeout {
+            reconnect(&mut client, &config).expect("recover timed out request");
+            notify_reconnected(&client, &event_tx).expect("notify waiting UI queries");
+        } else {
+            assert!(check_connection(
+                false,
+                &mut client,
+                &request_rx,
+                &event_tx,
+                &config
+            ));
+        }
+        let TcpOrUnixStream::Unix(stream) = &client.stream else {
+            panic!("expected Unix connection");
+        };
+        assert_eq!(
+            stream.read_timeout().expect("read timeout"),
+            Some(config.mpd_read_timeout)
+        );
+        assert_eq!(
+            stream.write_timeout().expect("write timeout"),
+            Some(config.mpd_write_timeout)
+        );
         match event_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("reconnected event")

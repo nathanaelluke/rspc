@@ -96,7 +96,16 @@ trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 struct Wire {
     stream: BufStream<Box<dyn Io>>,
+    synchronized: bool,
 }
+#[derive(Debug)]
+struct CommandFailure(String);
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "MPD: {}", self.0)
+    }
+}
+impl std::error::Error for CommandFailure {}
 fn mixer_unavailable(error: &anyhow::Error) -> bool {
     error
         .to_string()
@@ -125,6 +134,12 @@ fn disconnected(error: &anyhow::Error) -> bool {
     })
 }
 impl Wire {
+    fn new(stream: Box<dyn Io>) -> Self {
+        Self {
+            stream: BufStream::new(stream),
+            synchronized: true,
+        }
+    }
     async fn open(settings: &Settings) -> Result<Self> {
         let stream: Box<dyn Io> = if settings.address.starts_with('/') {
             Box::new(
@@ -145,9 +160,7 @@ impl Wire {
                 .context("MPD connection timed out")??,
             )
         };
-        let mut wire = Self {
-            stream: BufStream::new(stream),
-        };
+        let mut wire = Self::new(stream);
         let mut hello = String::new();
         tokio::time::timeout(Duration::from_secs(2), wire.stream.read_line(&mut hello)).await??;
         ensure!(
@@ -163,14 +176,29 @@ impl Wire {
     }
     async fn command(&mut self, command: &str) -> Result<Vec<u8>> {
         ensure!(!command.contains(['\n', '\r', '\0']), "invalid MPD command");
-        tokio::time::timeout(Duration::from_secs(12), async {
+        if !self.synchronized {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "MPD connection needs to be re-established",
+            )
+            .into());
+        }
+        self.synchronized = false;
+        let result = tokio::time::timeout(Duration::from_secs(12), async {
             self.stream.write_all(command.as_bytes()).await?;
             self.stream.write_all(b"\n").await?;
             self.stream.flush().await?;
             self.response().await
         })
         .await
-        .context("MPD request timed out")?
+        .context("MPD request timed out")
+        .and_then(|result| result);
+        self.synchronized = result.is_ok()
+            || result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.is::<CommandFailure>());
+        result
     }
     async fn volume(&mut self, volume: u8, starting: bool) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -193,14 +221,16 @@ impl Wire {
         loop {
             let mut line = Vec::new();
             ensure!(
-                self.stream.read_until(b'\n', &mut line).await? > 0,
+                self.stream.read_until(b'\n', &mut line).await? > 0 && line.last() == Some(&b'\n'),
                 "MPD disconnected"
             );
             if line == b"OK\n" {
                 return Ok(out);
             }
             if line.starts_with(b"ACK ") {
-                bail!("MPD: {}", String::from_utf8_lossy(&line).trim());
+                return Err(
+                    CommandFailure(String::from_utf8_lossy(&line).trim().to_owned()).into(),
+                );
             }
             ensure!(
                 out.len() + line.len() <= 32 * 1024 * 1024,

@@ -6,9 +6,7 @@ fn expired_player(settings: Settings, lease_path: PathBuf, active: bool) -> Play
     Player {
         settings,
         state: Mutex::new(PlayerState {
-            wire: Wire {
-                stream: BufStream::new(Box::new(client)),
-            },
+            wire: Wire::new(Box::new(client)),
             lease: active.then(|| Lease {
                 name: "fixture".into(),
                 origin: "default".into(),
@@ -149,9 +147,7 @@ async fn library_reads_reconnect_but_uncertain_writes_are_never_replayed() {
     });
     let (client, server) = UnixStream::pair().unwrap();
     drop(server);
-    *library.wire.lock().await = Some(Wire {
-        stream: BufStream::new(Box::new(client)),
-    });
+    *library.wire.lock().await = Some(Wire::new(Box::new(client)));
     let server = scripted_peer(listener, vec![("lsinfo \"\"", "file: fixture.flac\nOK\n")]);
     assert_eq!(
         library.request("lsinfo \"\"").await.unwrap(),
@@ -173,9 +169,7 @@ async fn library_reads_reconnect_but_uncertain_writes_are_never_replayed() {
         assert_eq!(command, "playlistadd \"mix\" \"fixture.flac\"\n");
         // The edit applied, but the acknowledgement was lost.
     });
-    *library.wire.lock().await = Some(Wire {
-        stream: BufStream::new(Box::new(client)),
-    });
+    *library.wire.lock().await = Some(Wire::new(Box::new(client)));
     assert!(
         library
             .request("playlistadd \"mix\" \"fixture.flac\"")
@@ -194,9 +188,7 @@ async fn library_reads_reconnect_but_uncertain_writes_are_never_replayed() {
     );
     let (client, server) = UnixStream::pair().unwrap();
     drop(server);
-    *library.wire.lock().await = Some(Wire {
-        stream: BufStream::new(Box::new(client)),
-    });
+    *library.wire.lock().await = Some(Wire::new(Box::new(client)));
     let server = scripted_peer(
         listener,
         vec![("playlistadd \"mix\" \"fixture.flac\"", "OK\n")],
@@ -218,9 +210,7 @@ async fn interrupted_artwork_reads_restart_the_chunk_on_a_new_connection() {
         password: None,
     });
     let (client, peer) = UnixStream::pair().unwrap();
-    *library.wire.lock().await = Some(Wire {
-        stream: BufStream::new(Box::new(client)),
-    });
+    *library.wire.lock().await = Some(Wire::new(Box::new(client)));
     let partial = tokio::spawn(async move {
         let mut peer = BufStream::new(peer);
         let mut command = String::new();
@@ -261,9 +251,7 @@ async fn reconnecting_a_load_is_atomic_with_respect_to_the_idle_observer() {
         true,
     ));
     let (client, peer) = UnixStream::pair().unwrap();
-    player.state.lock().await.wire = Wire {
-        stream: BufStream::new(Box::new(client)),
-    };
+    player.state.lock().await.wire = Wire::new(Box::new(client));
     let (failed, failure) = tokio::sync::oneshot::channel();
     let first = tokio::spawn(async move {
         let mut peer = BufStream::new(peer);
@@ -340,6 +328,83 @@ async fn reconnecting_a_load_is_atomic_with_respect_to_the_idle_observer() {
 }
 
 #[tokio::test]
+async fn cancelled_commands_cannot_leave_a_late_reply_for_the_next_command() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let (partial_tx, partial_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut server = BufStream::new(server);
+        let mut command = String::new();
+        server.read_line(&mut command).await.unwrap();
+        assert_eq!(command, "pause 1\n");
+        server.write_all(b"OK").await.unwrap();
+        server.flush().await.unwrap();
+        partial_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        server.write_all(b"\n").await.unwrap();
+        server.flush().await.unwrap();
+        command.clear();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), server.read_line(&mut command))
+                .await
+                .is_err()
+        );
+    });
+    let mut wire = Wire::new(Box::new(client));
+    tokio::select! {
+        result = wire.command("pause 1") => panic!("command completed before its reply: {result:?}"),
+        result = partial_rx => result.unwrap(),
+    }
+    release_tx.send(()).unwrap();
+    assert!(disconnected(&wire.command("status").await.unwrap_err()));
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn complete_mpd_errors_leave_the_connection_usable() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let task = tokio::spawn(async move {
+        let mut server = BufStream::new(server);
+        for (expected, response) in [
+            ("pause 1\n", "ACK [50@0] {pause} Not playing\n"),
+            ("ping\n", "OK\n"),
+        ] {
+            let mut command = String::new();
+            server.read_line(&mut command).await.unwrap();
+            assert_eq!(command, expected);
+            server.write_all(response.as_bytes()).await.unwrap();
+            server.flush().await.unwrap();
+        }
+    });
+    let mut wire = Wire::new(Box::new(client));
+    let error = wire.command("pause 1").await.unwrap_err();
+    assert!(!disconnected(&error));
+    assert!(error.to_string().contains("Not playing"));
+    wire.command("ping").await.unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn truncated_mpd_errors_are_transport_failures() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let task = tokio::spawn(async move {
+        let mut server = BufStream::new(server);
+        let mut command = String::new();
+        server.read_line(&mut command).await.unwrap();
+        assert_eq!(command, "pause 1\n");
+        server
+            .write_all(b"ACK [50@0] {pause} Not playing")
+            .await
+            .unwrap();
+        server.flush().await.unwrap();
+    });
+    let mut wire = Wire::new(Box::new(client));
+    assert!(disconnected(&wire.command("pause 1").await.unwrap_err()));
+    assert!(disconnected(&wire.command("ping").await.unwrap_err()));
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn startup_volume_waits_for_the_output_mixer() {
     let (client, mut server) = UnixStream::pair().unwrap();
     let task = tokio::spawn(async move {
@@ -352,9 +417,7 @@ async fn startup_volume_waits_for_the_output_mixer() {
             server.flush().await.unwrap();
         }
     });
-    let mut wire = Wire {
-        stream: BufStream::new(Box::new(client)),
-    };
+    let mut wire = Wire::new(Box::new(client));
     wire.volume(40, true).await.unwrap();
     task.await.unwrap();
 }
@@ -373,9 +436,7 @@ async fn startup_volume_does_not_retry_other_mpd_errors() {
             .unwrap();
         server.flush().await.unwrap();
     });
-    let mut wire = Wire {
-        stream: BufStream::new(Box::new(client)),
-    };
+    let mut wire = Wire::new(Box::new(client));
     let error = wire.volume(40, true).await.unwrap_err();
     assert!(error.to_string().contains("permission denied"));
     task.await.unwrap();
@@ -399,9 +460,7 @@ async fn startup_volume_stops_retrying_if_the_mixer_never_opens() {
             server.flush().await.unwrap();
         }
     });
-    let mut wire = Wire {
-        stream: BufStream::new(Box::new(client)),
-    };
+    let mut wire = Wire::new(Box::new(client));
     let error = tokio::time::timeout(Duration::from_secs(5), wire.volume(40, true))
         .await
         .unwrap()
@@ -496,9 +555,7 @@ async fn check_load_volume(
     let player = Player {
         settings: Settings::default(),
         state: Mutex::new(PlayerState {
-            wire: Wire {
-                stream: BufStream::new(Box::new(client)),
-            },
+            wire: Wire::new(Box::new(client)),
             lease: Some(Lease {
                 name: "fixture".into(),
                 origin: "default".into(),
@@ -600,9 +657,7 @@ async fn binary_artwork_preserves_bytes_and_the_next_response() {
             .await
             .unwrap();
     });
-    let mut wire = Wire {
-        stream: BufStream::new(Box::new(client)),
-    };
+    let mut wire = Wire::new(Box::new(client));
     assert_eq!(
         wire.response().await.unwrap(),
         b"size: 3\nbinary: 3\n\x00\xff\n\n"
@@ -614,9 +669,7 @@ async fn binary_artwork_preserves_bytes_and_the_next_response() {
 async fn oversized_binary_chunks_are_rejected_before_allocation() {
     let (client, mut server) = UnixStream::pair().unwrap();
     server.write_all(b"binary: 1073741824\n").await.unwrap();
-    let mut wire = Wire {
-        stream: BufStream::new(Box::new(client)),
-    };
+    let mut wire = Wire::new(Box::new(client));
     assert!(
         wire.response()
             .await

@@ -509,6 +509,53 @@ mod save_action_tests {
     }
 
     #[rstest]
+    fn reconnect_restarts_a_menu_query_that_never_completed(mut ctx: Ctx) {
+        use crate::{
+            shared::events::ClientRequest,
+            ui::{
+                UiEvent,
+                modals::{Modal, menu::modal::MenuModal},
+            },
+        };
+
+        enable_library(&mut ctx);
+        let (sender, requests) = crossbeam::channel::unbounded();
+        ctx.client_request_sender = sender;
+        let mut menu = MenuModal::new(&ctx)
+            .list_section(&ctx, |mut section| {
+                add_song_collection_actions(&mut section, &ctx, |_| Ok(Vec::new()));
+                Some(section)
+            })
+            .build();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| menu.render(frame, &mut ctx).expect("render waiting menu"))
+            .expect("draw waiting menu");
+        assert!(matches!(
+            requests.try_recv().expect("first query"),
+            ClientRequest::Query(query) if query.id == QUERY_ID
+        ));
+        assert!(requests.try_recv().is_err());
+        menu.on_event(&mut UiEvent::Reconnected, &ctx)
+            .expect("reset interrupted library load");
+        terminal
+            .draw(|frame| {
+                menu.render(frame, &mut ctx)
+                    .expect("render reconnecting menu");
+            })
+            .expect("draw reconnecting menu");
+        assert!(matches!(
+            requests.try_recv().expect("replacement query"),
+            ClientRequest::Query(query) if query.id == QUERY_ID
+        ));
+        terminal
+            .draw(|frame| menu.render(frame, &mut ctx).expect("render loading menu"))
+            .expect("draw loading menu");
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[rstest]
     fn stale_library_replies_do_not_restore_invalidated_membership(mut ctx: Ctx) {
         enable_library(&mut ctx);
         let mut section = ListSection::default();
