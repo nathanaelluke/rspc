@@ -129,10 +129,9 @@ fn main() -> Result<()> {
                 "debug",
                 None,
                 false,
+                (Duration::from_secs(3), Duration::from_secs(3)),
             )?;
 
-            client.set_read_timeout(Some(Duration::from_secs(3)))?;
-            client.set_write_timeout(Some(Duration::from_secs(3)))?;
             client.stream.write_all(command.as_bytes())?;
             client.stream.write_all(b"\n")?;
             client.stream.flush()?;
@@ -219,6 +218,7 @@ fn main() -> Result<()> {
                 "debug",
                 None,
                 false,
+                (config.mpd_read_timeout, config.mpd_write_timeout),
             )
             .and_then(|mut client| -> Result<_, _> {
                 let version = client.version();
@@ -333,6 +333,7 @@ fn main() -> Result<()> {
                 "main",
                 args.partition.partition,
                 args.partition.autocreate,
+                (config.mpd_read_timeout, config.mpd_write_timeout),
             )?;
             client.set_read_timeout(None)?;
             result(&mut client)?;
@@ -405,10 +406,9 @@ fn main() -> Result<()> {
                 "command",
                 args.partition.partition,
                 args.partition.autocreate,
+                (config.mpd_read_timeout, config.mpd_write_timeout),
             )
             .context("Failed to connect to MPD")?;
-            client.set_read_timeout(Some(config.mpd_read_timeout))?;
-            client.set_write_timeout(Some(config.mpd_write_timeout))?;
 
             let tx_clone = event_tx.clone();
 

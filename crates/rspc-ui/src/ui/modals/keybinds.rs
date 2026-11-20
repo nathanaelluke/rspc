@@ -309,6 +309,10 @@ impl Modal for KeybindsModal {
         self.id
     }
 
+    fn owns_input_buffer(&self, id: BufferId) -> bool {
+        id == self.filter_buffer_id
+    }
+
     fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
         let popup_area = limit_modal_width(
             frame
@@ -514,6 +518,7 @@ impl Modal for KeybindsModal {
                     ctx.render()?;
                 }
                 CommonAction::Close => {
+                    ctx.input.destroy_buffer(self.filter_buffer_id);
                     self.hide(ctx)?;
                 }
                 CommonAction::EnterSearch => {

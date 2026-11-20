@@ -7,7 +7,10 @@ use crate::{
     config::keys::actions::DuplicateStrategy,
     ctx::Ctx,
     mpd::{
-        client::Client, commands::library::LibraryItem, errors::MpdError, mpd_client::MpdClient,
+        client::Client,
+        commands::library::LibraryItem,
+        errors::MpdError,
+        mpd_client::{LikedSongsEdit, MpdClient},
     },
     shared::{
         id::{self, Id},
@@ -383,24 +386,12 @@ pub fn remove_from_liked_songs(ctx: &Ctx, paths: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum LikedSongsEdit {
-    Add,
-    Remove,
-    Toggle,
-}
-
 fn update_liked_songs(
     ctx: &Ctx,
     songs: impl FnOnce(&mut Client<'_>) -> Result<Vec<String>> + Send + 'static,
     edit: LikedSongsEdit,
 ) {
-    let command = match edit {
-        LikedSongsEdit::Add => "rspc_library_add",
-        LikedSongsEdit::Remove => "rspc_library_remove",
-        LikedSongsEdit::Toggle => "rspc_library_toggle",
-    };
-    if !ctx.supported_commands.contains(command) {
+    if !ctx.supported_commands.contains(edit.command()) {
         status_warn!(
             "Spotify Liked Songs is unavailable on this server. Open rspc without --local; if rspc is already running, run `rspc stop` and reopen it to update the daemon."
         );
@@ -413,11 +404,7 @@ fn update_liked_songs(
             status_warn!("No songs selected");
             return Ok(());
         }
-        let (added, removed) = match edit {
-            LikedSongsEdit::Add => (client.add_liked_tracks(&paths)?, 0),
-            LikedSongsEdit::Remove => (0, client.remove_liked_tracks(&paths)?),
-            LikedSongsEdit::Toggle => client.toggle_liked_tracks(&paths)?,
-        };
+        let (added, removed) = client.edit_liked_tracks(&paths, edit)?;
         match (added, removed) {
             (0, 0) if matches!(edit, LikedSongsEdit::Remove) => status_info!("Not in Liked Songs"),
             (0, 0) => status_info!("Already in Liked Songs"),

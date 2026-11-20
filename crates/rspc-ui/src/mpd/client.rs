@@ -7,6 +7,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::{Shutdown, TcpStream},
     os::unix::net::UnixStream,
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -140,6 +141,7 @@ impl<'name> Client<'name> {
         name: &'name str,
         partition: Option<String>,
         autocreate_partition: bool,
+        (read_timeout, write_timeout): (Duration, Duration),
     ) -> MpdResult<Client<'name>> {
         let mut stream = match addr {
             MpdAddress::IpAndPort(ref addr) => TcpOrUnixStream::Tcp(TcpStream::connect(addr)?),
@@ -156,8 +158,8 @@ impl<'name> Client<'name> {
                 ));
             }
         };
-        stream.set_write_timeout(None)?;
-        stream.set_read_timeout(None)?;
+        stream.set_write_timeout(Some(write_timeout))?;
+        stream.set_read_timeout(Some(read_timeout))?;
         let mut rx = BufReader::new(stream.try_clone()?);
 
         let mut buf = String::new();
@@ -216,86 +218,26 @@ impl<'name> Client<'name> {
             }
         }
 
-        // 2^18 seems to be max limit supported by MPD and higher values dont
-        // have any effect
-        client.binary_limit(2u64.pow(18))?;
         client.supported_commands = client.commands()?.0.into_iter().collect();
+        client.binary_limit(2u64.pow(18))?;
 
         Ok(client)
     }
 
     pub fn reconnect(
         &mut self,
-        read_timeout: std::time::Duration,
-        write_timeout: std::time::Duration,
+        read_timeout: Duration,
+        write_timeout: Duration,
     ) -> MpdResult<&Client<'_>> {
         debug!(name = self.name, addr:? = self.addr; "trying to reconnect");
-        let mut stream = match &self.addr {
-            MpdAddress::IpAndPort(addr) => TcpOrUnixStream::Tcp(TcpStream::connect(addr)?),
-            MpdAddress::SocketPath(addr) => TcpOrUnixStream::Unix(UnixStream::connect(addr)?),
-            #[cfg(target_os = "linux")]
-            MpdAddress::AbstractSocket(addr) => {
-                let addr = SocketAddr::from_abstract_name(addr)?;
-                TcpOrUnixStream::Unix(UnixStream::connect_addr(&addr)?)
-            }
-            #[cfg(not(target_os = "linux"))]
-            MpdAddress::AbstractSocket(addr) => {
-                return Err(MpdError::Generic(
-                    "Abstract socket only supported on Linux".to_string(),
-                ));
-            }
-        };
-        stream.set_write_timeout(Some(write_timeout))?;
-        stream.set_read_timeout(Some(read_timeout))?;
-        let mut rx = BufReader::new(stream.try_clone()?);
-
-        let mut buf = String::new();
-        rx.read_line(&mut buf)?;
-        if !buf.starts_with("OK") {
-            return Err(MpdError::Generic(format!(
-                "Handshake validation failed. '{buf}'"
-            )));
-        }
-
-        let Some(version): Option<Version> =
-            buf.strip_prefix("OK MPD ").and_then(|v| v.parse().ok())
-        else {
-            return Err(MpdError::Generic(format!(
-                "Handshake validation failed. Cannot parse version from '{buf}'"
-            )));
-        };
-
-        self.rx = rx;
-        self.stream = stream;
-        self.version = version;
-        self.config = None;
-
-        debug!(name = self.name, addr:? = self.addr, handshake = buf.trim(), version = version.to_string().as_str(); "MPD client initialized");
-
-        if let Some(MpdPassword(password)) = &self.password.clone() {
-            debug!("Used password auth to MPD");
-            self.password(password)?;
-        }
-
-        if let Some(partition) = self.partition.clone() {
-            debug!(partition = partition.as_str(); "Using partition");
-            match self.switch_to_partition(&partition) {
-                Ok(()) => {}
-                Err(MpdError::Mpd(MpdFailureResponse {
-                    code: ErrorCode::NoExist,
-                    ..
-                })) if self.autocreate_partition => {
-                    self.new_partition(&partition)?;
-                    self.switch_to_partition(&partition)?;
-                }
-                err @ Err(_) => err?,
-            }
-        }
-
-        self.supported_commands = self.commands()?.0.into_iter().collect();
-
-        self.binary_limit(1024 * 1024 * 5)?;
-
+        *self = Self::init(
+            self.addr.clone(),
+            self.password.clone(),
+            self.name,
+            self.partition.clone(),
+            self.autocreate_partition,
+            (read_timeout, write_timeout),
+        )?;
         Ok(self)
     }
 
@@ -359,7 +301,7 @@ impl SocketClient for Client<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use crate::mpd::mpd_client::LikedSongsEdit;
 
     fn pair() -> (Client<'static>, UnixStream) {
         let (stream, peer) = UnixStream::pair().expect("socket pair");
@@ -380,6 +322,22 @@ mod tests {
     }
 
     #[test]
+    fn a_complete_artwork_chunk_does_not_request_the_end_offset() {
+        let (mut client, mut peer) = pair();
+        peer.write_all(
+            b"size: 3\nbinary: 3\nabc\nOK\nACK [2@0] {readpicture} offset outside file\n",
+        )
+        .expect("artwork response");
+        assert_eq!(
+            client
+                .read_picture("fixture.flac")
+                .expect("read artwork")
+                .as_deref(),
+            Some(b"abc".as_slice())
+        );
+    }
+
+    #[test]
     fn liked_songs_command_sends_the_selected_uris_and_reads_the_update_count() {
         let (mut client, mut peer) = pair();
         peer.write_all(b"library_added: 2\nOK\n").expect("reply");
@@ -387,7 +345,12 @@ mod tests {
             "spotify:track:first".to_owned(),
             "spotify:track:second".to_owned(),
         ];
-        assert_eq!(client.add_liked_tracks(&uris).expect("like tracks"), 2);
+        assert_eq!(
+            client
+                .edit_liked_tracks(&uris, LikedSongsEdit::Add)
+                .expect("like tracks"),
+            (2, 0)
+        );
         let mut command = String::new();
         BufReader::new(peer)
             .read_line(&mut command)
@@ -399,11 +362,41 @@ mod tests {
     }
 
     #[test]
+    fn toggling_validates_every_batch_before_writing() {
+        let (mut client, mut peer) = pair();
+        peer.write_all(
+            b"library_added: 1\nlibrary_removed: 0\nOK\nACK [2@0] {rspc_library_toggle} Spotify tracks only\n",
+        )
+        .expect("replies for a partial batch");
+        let mut uris: Vec<_> = (0..1000)
+            .map(|index| format!("spotify:track:{index}"))
+            .collect();
+        uris.push("mpd:local.flac".into());
+        assert!(
+            client
+                .edit_liked_tracks(&uris, LikedSongsEdit::Toggle)
+                .is_err()
+        );
+        peer.set_nonblocking(true).expect("nonblocking peer");
+        assert_eq!(
+            std::io::Read::read(&mut peer, &mut [0])
+                .expect_err("invalid selections must not send a partial batch")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
     fn unliking_sends_uris_and_validates_every_batch_before_writing() {
         let (mut client, mut peer) = pair();
         peer.write_all(b"library_removed: 2\nOK\n").expect("reply");
         let uris = vec!["spotify:track:first".into(), "spotify:track:second".into()];
-        assert_eq!(client.remove_liked_tracks(&uris).expect("unlike tracks"), 2);
+        assert_eq!(
+            client
+                .edit_liked_tracks(&uris, LikedSongsEdit::Remove)
+                .expect("unlike tracks"),
+            (0, 2)
+        );
         let mut command = String::new();
         BufReader::new(&mut peer)
             .read_line(&mut command)
@@ -414,7 +407,11 @@ mod tests {
         );
         let mut invalid = vec!["spotify:track:first".into(); 1000];
         invalid.push("mpd:local.flac".into());
-        assert!(client.remove_liked_tracks(&invalid).is_err());
+        assert!(
+            client
+                .edit_liked_tracks(&invalid, LikedSongsEdit::Remove)
+                .is_err()
+        );
         peer.set_nonblocking(true).expect("nonblocking peer");
         let mut bytes = [0];
         assert_eq!(

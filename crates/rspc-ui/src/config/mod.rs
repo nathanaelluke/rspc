@@ -44,6 +44,9 @@ use crate::{
     tmux,
 };
 
+const DEFAULT_MPD_READ_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_MPD_WRITE_TIMEOUT_MS: u64 = 5_000;
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -197,8 +200,8 @@ impl Default for ConfigFile {
             volume_step: 5,
             scrolloff: 0,
             status_update_interval_ms: Some(1000),
-            mpd_write_timeout_ms: 5_000,
-            mpd_read_timeout_ms: 10_000,
+            mpd_write_timeout_ms: DEFAULT_MPD_WRITE_TIMEOUT_MS,
+            mpd_read_timeout_ms: DEFAULT_MPD_READ_TIMEOUT_MS,
             mpd_idle_read_timeout_ms: None,
             max_fps: 30,
             song_info_max_aspect_ratio: Some(2.0),

@@ -990,8 +990,10 @@ impl<'ui> Ui<'ui> {
             UiEvent::Database => {
                 ctx.liked_song_uris.borrow_mut().take();
                 let rspc = ctx.supported_commands.contains("rspc_identity");
-                ctx.input
-                    .retain_buffers(|id| rspc && self.panes.search.owns_input_buffer(id));
+                ctx.input.retain_buffers(|id| {
+                    (rspc && self.panes.search.owns_input_buffer(id))
+                        || self.modals.iter().any(|modal| modal.owns_input_buffer(id))
+                });
                 if !rspc {
                     status_warn!(
                         "The music database has been updated. Some parts of the UI may have been reinitialized to prevent inconsistent behaviours."
@@ -1162,6 +1164,49 @@ pub enum UiAppEvent {
     PopConfigErrorModal,
     ChangeTab(TabName),
     BrowseTag { pane: PaneType, value: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+    use crate::{tests::fixtures::ctx, ui::input::InputMode};
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn database_updates_keep_popup_drafts(mut ctx: Ctx, #[case] rspc: bool) {
+        if rspc {
+            ctx.supported_commands.insert("rspc_identity".into());
+        }
+        let mut ui = Ui::new(&ctx).expect("UI");
+        let popup = InputModal::with_value(&ctx, "existing playlist").on_confirm(|_, _| Ok(()));
+        ui.on_ui_app_event(UiAppEvent::Modal(Box::new(popup)), &mut ctx)
+            .expect("open popup");
+        let InputMode::Insert(buffer) = ctx.input.mode() else {
+            panic!("expected an active popup input");
+        };
+        assert_eq!(ctx.input.value(buffer), "existing playlist");
+        MenuModal::new(&ctx)
+            .destroy(&ctx)
+            .expect("close previous menu");
+        assert!(ctx.input.is_active(buffer));
+        ctx.input
+            .set_buffer("unfinished playlist name".into(), buffer);
+
+        ui.on_event(UiEvent::Database, &mut ctx)
+            .expect("database updated");
+
+        assert!(ctx.input.is_active(buffer));
+        assert_eq!(ctx.input.value(buffer), "unfinished playlist name");
+
+        ctx.input.normal_mode();
+        ui.on_event(UiEvent::Database, &mut ctx)
+            .expect("database updated while focus is on a button");
+        assert!(ctx.input.is_normal_mode());
+        assert_eq!(ctx.input.value(buffer), "unfinished playlist name");
+    }
 }
 
 #[derive(Debug)]

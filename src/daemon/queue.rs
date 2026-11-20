@@ -1,7 +1,7 @@
 use crate::model::TrackInfo;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{ops::Range, path::Path};
 
 #[derive(Debug)]
 pub struct MissingQueueId(pub u32);
@@ -84,15 +84,35 @@ impl Queue {
         false
     }
     pub fn position(&self, text: &str) -> Result<usize> {
-        let current = self.cursor().unwrap_or(0);
-        let value = if let Some(n) = text.strip_prefix('+') {
-            current.saturating_add(1).saturating_add(n.parse()?)
-        } else if let Some(n) = text.strip_prefix('-') {
-            current.saturating_sub(n.parse()?)
+        self.position_excluding(text, 0..0)
+    }
+    fn position_excluding(&self, text: &str, moving: Range<usize>) -> Result<usize> {
+        if !text.starts_with(['+', '-']) {
+            return Ok(text.parse()?);
+        }
+        let (direction, offset) = text.split_at(1);
+        let offset = offset.parse()?;
+        let current = self.cursor();
+        ensure!(
+            !current.is_some_and(|index| moving.contains(&index)),
+            "cannot move the current song relative to itself"
+        );
+        let remaining = self.entries.len() - moving.len();
+        let current = current.map(|index| {
+            if index >= moving.end {
+                index - moving.len()
+            } else {
+                index
+            }
+        });
+        let position = if direction == "+" {
+            current
+                .map_or(1.min(remaining), |index| index + 1)
+                .checked_add(offset)
         } else {
-            text.parse()?
+            current.unwrap_or(0).checked_sub(offset)
         };
-        Ok(value.min(self.entries.len()))
+        position.context("queue position out of range")
     }
     pub fn add(&mut self, tracks: Vec<TrackInfo>, position: usize) -> Result<Vec<u32>> {
         ensure!(
@@ -118,13 +138,17 @@ impl Queue {
         self.changed();
         Ok(ids)
     }
-    pub fn move_range(&mut self, start: usize, end: usize, destination: usize) -> Result<()> {
+    pub fn move_range(&mut self, start: usize, end: usize, destination: &str) -> Result<()> {
         ensure!(
             start < end && end <= self.entries.len(),
             "queue range out of bounds"
         );
+        let position = self.position_excluding(destination, start..end)?;
+        ensure!(
+            position <= self.entries.len() - (end - start),
+            "queue position out of range"
+        );
         let moving: Vec<_> = self.entries.drain(start..end).collect();
-        let position = destination.min(self.entries.len());
         self.entries.splice(position..position, moving);
         self.changed();
         Ok(())
@@ -171,7 +195,7 @@ mod tests {
         let mut q = Queue::default();
         let ids = q.add(vec![track(), track(), track()], 0).unwrap();
         q.current = Some(ids[1]);
-        q.move_range(1, 2, 0).unwrap();
+        q.move_range(1, 2, "0").unwrap();
         assert_eq!(q.cursor(), Some(0));
         q.delete(1, 2).unwrap();
         assert_eq!(

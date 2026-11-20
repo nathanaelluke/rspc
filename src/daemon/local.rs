@@ -111,8 +111,13 @@ impl std::fmt::Display for CommandFailure {
 impl std::error::Error for CommandFailure {}
 fn mixer_unavailable(error: &anyhow::Error) -> bool {
     error
-        .to_string()
-        .contains("{setvol} All outputs are disabled")
+        .downcast_ref::<CommandFailure>()
+        .and_then(|failure| failure.0.trim_end().split_once("] {setvol} "))
+        .is_some_and(|(_, message)| {
+            message == "All outputs are disabled"
+                || (message.starts_with("Failed to set mixer for ")
+                    && message.ends_with("; disconnected"))
+        })
 }
 fn disconnected(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {

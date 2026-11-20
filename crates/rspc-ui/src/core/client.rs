@@ -448,6 +448,7 @@ mod reconnect_tests {
             "stalled-reconnect-test",
             None,
             false,
+            (Duration::from_secs(2), Duration::from_secs(2)),
         )
         .expect("initial connection");
         let config = Config {
@@ -513,6 +514,7 @@ mod reconnect_tests {
             "reconnect-test",
             None,
             false,
+            (Duration::from_secs(2), Duration::from_secs(2)),
         )
         .expect("initial connection");
         assert_eq!(client.version.minor, 23);

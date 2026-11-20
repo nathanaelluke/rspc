@@ -1,6 +1,7 @@
 //! MPD protocol server for the shared queue.
 use super::{
     engine::Engine,
+    filter,
     queue::{Entry, Queue},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -57,6 +58,7 @@ fn failure(command: &str, index: usize, error: &anyhow::Error) -> String {
                     | "queue position is too large"
                     | "queue index out of range"
                     | "queue range out of bounds"
+                    | "cannot move the current song relative to itself"
                     | "invalid shuffle range"
                     | "invalid playlist save mode"
                     | "invalid playlist range"
@@ -605,8 +607,7 @@ async fn execute_command(engine: &Engine, args: &[String], binary_limit: usize) 
             engine
                 .edit_queue(|queue| {
                     let (a, b) = queue_range(queue, arg(args, 1)?, command == "moveid")?;
-                    let dest = queue.position(arg(args, 2)?)?;
-                    queue.move_range(a, b, dest)
+                    queue.move_range(a, b, arg(args, 2)?)
                 })
                 .await?;
             String::new()
@@ -731,18 +732,35 @@ async fn execute_command(engine: &Engine, args: &[String], binary_limit: usize) 
                 .collect()
         }
         "find" | "search" | "findadd" | "searchadd" => {
-            let tracks = engine
-                .catalog
-                .find(arg(args, 1)?, command.starts_with("search"))
-                .await?;
-            if command.ends_with("add") {
+            let search = command.starts_with("search");
+            let add = command.ends_with("add");
+            let query = arg(args, 1)?;
+            let mut filter_args = &args[1..];
+            let expression = query.trim_start().starts_with('(');
+            let mut position = None;
+            if add && args.get(2).is_some_and(|key| key == "position") && expression {
+                position = Some(arg(args, 3)?);
+            } else if add
+                && let [filters @ .., key, value] = filter_args
+                && key == "position"
+                && (filters.len() == 1 || filters.len().is_multiple_of(2))
+            {
+                filter_args = filters;
+                position = Some(value.as_str());
+            }
+            let filters = if expression || filter_args.len() == 1 {
+                filter::parse(query)?
+            } else {
+                filter::parse_pairs(filter_args, search)?
+            };
+            let tracks = engine.catalog.find_filtered(&filters, search).await?;
+            if add {
                 engine
                     .edit_queue(|queue| {
-                        let position = if args.get(2).is_some_and(|s| s == "position") {
-                            queue.position(arg(args, 3)?)?
-                        } else {
-                            queue.entries.len()
-                        };
+                        let position = position
+                            .map(|value| queue.position(value))
+                            .transpose()?
+                            .unwrap_or(queue.entries.len());
                         queue.add(tracks, position)
                     })
                     .await?;
@@ -842,8 +860,12 @@ async fn execute_command(engine: &Engine, args: &[String], binary_limit: usize) 
             if command == "load" {
                 engine
                     .edit_queue(|queue| {
-                        let n = queue.entries.len();
-                        queue.add(tracks, n)
+                        let position = args
+                            .get(3)
+                            .map(|value| queue.position(value))
+                            .transpose()?
+                            .unwrap_or(queue.entries.len());
+                        queue.add(tracks, position)
                     })
                     .await?;
                 String::new()

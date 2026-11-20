@@ -8,6 +8,25 @@ pub struct Predicate {
     pub value: String,
     regex: Option<(regex::Regex, regex::Regex)>,
 }
+
+pub fn parse_pairs(args: &[String], search: bool) -> Result<Vec<Predicate>> {
+    let (pairs, remainder) = args.as_chunks::<2>();
+    ensure!(
+        !pairs.is_empty() && remainder.is_empty(),
+        "expected filter tag and value pairs"
+    );
+    let op = if search { "contains" } else { "==" };
+    Ok(pairs
+        .iter()
+        .map(|[tag, value]| Predicate {
+            tag: tag.to_ascii_lowercase(),
+            op: op.to_owned(),
+            value: value.clone(),
+            regex: None,
+        })
+        .collect())
+}
+
 pub fn parse(input: &str) -> Result<Vec<Predicate>> {
     let mut c = input.chars().peekable();
     let mut result = Vec::new();

@@ -1016,24 +1016,26 @@ where
                 section.add_item("Create playlist", move |ctx| {
                     modal!(
                         ctx,
-                        InputModal::new(ctx)
-                            .title("Create new playlist")
-                            .confirm_label("Save")
-                            .input_label("Playlist name:")
-                            .initial_value(initial_playlist_name.unwrap_or_default())
-                            .on_confirm(move |ctx, value| {
-                                let value = value.to_owned();
-                                ctx.command(move |client| {
-                                    let items = playlist_songs(client)?;
-                                    client.create_playlist(
-                                        &value,
-                                        items.into_iter().map(|s| s.file).collect(),
-                                    )?;
+                        InputModal::with_value(
+                            ctx,
+                            initial_playlist_name.as_deref().unwrap_or_default()
+                        )
+                        .title("Create new playlist")
+                        .confirm_label("Save")
+                        .input_label("Playlist name:")
+                        .on_confirm(move |ctx, value| {
+                            let value = value.to_owned();
+                            ctx.command(move |client| {
+                                let items = playlist_songs(client)?;
+                                client.create_playlist(
+                                    &value,
+                                    items.into_iter().map(|s| s.file).collect(),
+                                )?;
 
-                                    Ok(())
-                                });
                                 Ok(())
-                            })
+                            });
+                            Ok(())
+                        })
                     );
                     Ok(())
                 });

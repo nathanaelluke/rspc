@@ -776,10 +776,17 @@ impl Catalog {
         bail!("unsupported Spotify path: {uri}")
     }
     pub async fn find(self: &Arc<Self>, query: &str, search: bool) -> Result<Vec<TrackInfo>> {
+        self.find_filtered(&filter::parse(query)?, search).await
+    }
+
+    pub async fn find_filtered(
+        self: &Arc<Self>,
+        filters: &[filter::Predicate],
+        search: bool,
+    ) -> Result<Vec<TrackInfo>> {
         if self.demo {
-            return self.spotify_find(query, search).await;
+            return self.spotify_find(filters, search).await;
         }
-        let filters = filter::parse(query)?;
         if let Some(uri) = filters.iter().find(|f| {
             matches!(f.tag.as_str(), "file" | "filename")
                 && f.op == "=="
@@ -792,19 +799,19 @@ impl Catalog {
             };
             return tracks
                 .into_iter()
-                .filter_map(|t| match filter::matches(&t, &filters, search) {
+                .filter_map(|t| match filter::matches(&t, filters, search) {
                     Ok(true) => Some(Ok(t)),
                     Ok(false) => None,
                     Err(e) => Some(Err(e)),
                 })
                 .collect();
         }
-        let (spotify, local) = tokio::join!(self.spotify_find(query, search), self.local.all());
+        let (spotify, local) = tokio::join!(self.spotify_find(filters, search), self.local.all());
         let local_available = local.is_ok();
         let mut local_matches = Vec::new();
         if let Ok(local) = local {
             for track in local.iter() {
-                if filter::matches(track, &filters, search)? {
+                if filter::matches(track, filters, search)? {
                     local_matches.push(track.clone());
                 }
             }
@@ -817,8 +824,11 @@ impl Catalog {
         let tracks = prefer_local_tracks(tracks, local_matches);
         Ok(self.remember(tracks).await)
     }
-    async fn spotify_find(self: &Arc<Self>, query: &str, search: bool) -> Result<Vec<TrackInfo>> {
-        let filters = filter::parse(query)?;
+    async fn spotify_find(
+        self: &Arc<Self>,
+        filters: &[filter::Predicate],
+        search: bool,
+    ) -> Result<Vec<TrackInfo>> {
         let tracks = if self.demo {
             self.liked().await?
         } else if search {
@@ -899,7 +909,7 @@ impl Catalog {
         };
         let mut selected = Vec::new();
         for track in tracks {
-            if filter::matches(&track, &filters, search)? {
+            if filter::matches(&track, filters, search)? {
                 selected.push(track);
             }
         }

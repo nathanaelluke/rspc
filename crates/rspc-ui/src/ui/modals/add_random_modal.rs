@@ -124,6 +124,10 @@ impl Modal for AddRandomModal<'_> {
         self.id
     }
 
+    fn owns_input_buffer(&self, id: BufferId) -> bool {
+        id == self.count_buffer_id
+    }
+
     fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
         let block = Block::default()
             .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)

@@ -158,28 +158,17 @@ impl<T: SocketClient> ProtoClient for T {
 
     fn read_bin(&mut self, command: &str) -> MpdResult<Option<Vec<u8>>> {
         let mut buf = Vec::new();
-        // trim the 0 offset from the initial command because we substitute
-        // an actual value here
-        let _ = match self.read_bin_inner(&mut buf) {
-            Ok(Some(v)) => Ok(Some(v)),
-            Ok(None) => return Ok(None),
-            Err(e) => {
-                self.reinit_buffer_if_needed(&e)?;
-                Err(e)
-            }
-        };
-
+        let command = command.strip_suffix(" 0").unwrap_or(command);
         loop {
-            let command = command.trim_end_matches(" 0");
-            let command = format!("{} {}", command, buf.len());
-            self.execute(command.as_ref())?;
             match self.read_bin_inner(&mut buf) {
-                Ok(Some(response)) => {
-                    if buf.len() >= response.size_total as usize || response.bytes_read == 0 {
-                        log::trace!(len = buf.len(); "Finished reading binary response");
-                        break;
-                    }
+                Ok(Some(response)) if buf.len() >= response.size_total as usize => {
+                    log::trace!(len = buf.len(); "Finished reading binary response");
+                    return Ok(Some(buf));
                 }
+                Ok(Some(response)) if response.bytes_read > 0 => {
+                    self.execute(&format!("{command} {}", buf.len()))?;
+                }
+                Ok(Some(_)) => return Err(MpdError::Parse("incomplete binary response".into())),
                 Ok(None) => return Ok(None),
                 Err(e) => {
                     self.reinit_buffer_if_needed(&e)?;
@@ -187,7 +176,6 @@ impl<T: SocketClient> ProtoClient for T {
                 }
             }
         }
-        Ok(Some(buf))
     }
 
     fn read_bin_inner(

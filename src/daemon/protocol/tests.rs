@@ -72,6 +72,112 @@ async fn fixture() -> (tempfile::TempDir, Arc<Engine>) {
     (dir, engine)
 }
 
+#[tokio::test]
+async fn invalid_queue_destinations_leave_the_queue_intact() {
+    let (_dir, engine) = fixture().await;
+    let queue = || async { execute(&engine, &["playlistinfo".into()]).await.unwrap() };
+    let before = queue().await;
+    for command in [
+        ["addid", "spotify:track:demo1", "4"],
+        ["move", "0", "3"],
+        ["move", "0:2", "2"],
+        ["moveid", "1", "999"],
+    ] {
+        let error = execute(&engine, &command.map(str::to_owned))
+            .await
+            .unwrap_err();
+        assert!(failure(command[0], 0, &error).starts_with("ACK [2@0]"));
+        assert_eq!(queue().await, before);
+    }
+    execute(&engine, &["play".into(), "1".into()])
+        .await
+        .unwrap();
+    execute(&engine, &["move".into(), "0".into(), "+0".into()])
+        .await
+        .unwrap();
+    let after = String::from_utf8(queue().await).unwrap();
+    assert_eq!(
+        after
+            .lines()
+            .filter_map(|line| line.strip_prefix("Id: "))
+            .collect::<Vec<_>>(),
+        ["2", "1", "3"]
+    );
+}
+
+#[tokio::test]
+async fn legacy_filters_support_exact_lookup_and_case_insensitive_search() {
+    let (_dir, engine) = fixture().await;
+    let reply = |command: Vec<String>| {
+        let engine = &engine;
+        async move { String::from_utf8(execute(engine, &command).await.unwrap()).unwrap() }
+    };
+    let exact = reply(
+        [
+            "find",
+            "Artist",
+            "The Example Ensemble",
+            "Title",
+            "Morning Light",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    )
+    .await;
+    assert_eq!(exact.matches("file: ").count(), 1);
+    assert!(exact.contains("file: spotify:track:demo1\n"));
+    let search = reply(
+        ["search", "artist", "eXamPle", "Title", "mORning"]
+            .map(str::to_owned)
+            .to_vec(),
+    )
+    .await;
+    assert_eq!(search, exact);
+    let empty = reply(["find", "Artist", "example"].map(str::to_owned).to_vec()).await;
+    assert!(empty.is_empty());
+    reply(
+        ["findadd", "Title", "Second Window", "position", "0"]
+            .map(str::to_owned)
+            .to_vec(),
+    )
+    .await;
+    assert!(
+        reply(vec!["playlistinfo".into()])
+            .await
+            .starts_with("file: spotify:track:demo2\n")
+    );
+}
+
+#[tokio::test]
+async fn loading_a_saved_playlist_honors_the_queue_position() {
+    let (_dir, engine) = fixture().await;
+    for command in [
+        &["save", "fixture"][..],
+        &["move", "0", "2"],
+        &["load", "fixture", "0:1", "0"],
+    ] {
+        execute(
+            &engine,
+            &command
+                .iter()
+                .map(|arg| (*arg).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+    }
+    let command = ["playlistinfo".into(), "0".into()];
+    let first = execute(&engine, &command).await.unwrap();
+    assert!(first.starts_with(b"file: spotify:track:demo1\n"));
+    let error = execute(
+        &engine,
+        &["load", "fixture", "0:", "999"].map(str::to_owned),
+    )
+    .await
+    .unwrap_err();
+    assert!(failure("load", 0, &error).starts_with("ACK [2@0]"));
+}
+
 async fn framing_client(
     engine: Arc<Engine>,
 ) -> (

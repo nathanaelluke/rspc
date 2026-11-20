@@ -8,7 +8,7 @@ use crate::{
     MpdQueryResult,
     ctx::Ctx,
     shared::{id::Id, keys::ActionEvent, mouse_event::MouseEvent},
-    ui::input::InputResultEvent,
+    ui::input::{BufferId, InputResultEvent},
 };
 
 pub mod add_random_modal;
@@ -51,6 +51,10 @@ fn limit_modal_width(area: Rect, ratio: Option<f64>) -> Rect {
 #[allow(unused)]
 pub(crate) trait Modal: std::fmt::Debug {
     fn id(&self) -> Id;
+
+    fn owns_input_buffer(&self, id: BufferId) -> bool {
+        false
+    }
 
     fn render(&mut self, frame: &mut Frame, ctx: &mut crate::ctx::Ctx) -> Result<()>;
 

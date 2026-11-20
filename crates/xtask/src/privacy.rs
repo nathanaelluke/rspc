@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use regex::bytes::Regex;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
@@ -76,10 +77,15 @@ pub fn check_file(path: &Path, data: &[u8]) -> Vec<Finding> {
         return finding(path, "private config, runtime data or build output");
     }
     if data.contains(&0) {
-        return if ["crates/rspc-ui/assets/default.jpg", "assets/screenshot.png"]
-            .iter()
-            .any(|reviewed| path == Path::new(reviewed))
-        {
+        let reviewed = match path.to_str() {
+            Some("crates/rspc-ui/assets/default.jpg" | "assets/screenshot.png") => true,
+            Some("crates/rspc-ui/assets/default.png") => {
+                format!("{:x}", Sha256::digest(data))
+                    == "4a9872a79fd6df603cc0af0caa3611c583ad6832f2c1b161f45108e9c44ffe5a"
+            }
+            _ => false,
+        };
+        return if reviewed {
             Vec::new()
         } else {
             finding(path, "unreviewed binary file")
@@ -342,6 +348,9 @@ mod tests {
             )
             .is_empty()
         );
+        let path = Path::new("crates/rspc-ui/assets/default.png");
+        assert!(check_file(path, include_bytes!("../../rspc-ui/assets/default.png")).is_empty());
+        assert!(!check_file(path, b"image\0data").is_empty());
     }
     #[test]
     fn examples_and_public_service_accounts_are_allowed() {

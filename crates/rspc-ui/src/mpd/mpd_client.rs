@@ -36,6 +36,23 @@ use crate::{
 
 type MpdResult<T> = Result<T, MpdError>;
 
+#[derive(Clone, Copy)]
+pub(crate) enum LikedSongsEdit {
+    Add,
+    Remove,
+    Toggle,
+}
+
+impl LikedSongsEdit {
+    pub(crate) fn command(self) -> &'static str {
+        match self {
+            Self::Add => "rspc_library_add",
+            Self::Remove => "rspc_library_remove",
+            Self::Toggle => "rspc_library_toggle",
+        }
+    }
+}
+
 #[derive(AsRefStr, Debug)]
 #[allow(dead_code)]
 pub enum SaveMode {
@@ -229,18 +246,6 @@ pub trait MpdClient: Sized {
         ))
     }
 
-    fn add_liked_tracks(&mut self, _uris: &[String]) -> MpdResult<usize> {
-        Err(MpdError::Generic(
-            "Liked Songs is not supported by this server".into(),
-        ))
-    }
-
-    fn remove_liked_tracks(&mut self, _uris: &[String]) -> MpdResult<usize> {
-        Err(MpdError::Generic(
-            "Liked Songs is not supported by this server".into(),
-        ))
-    }
-
     fn selection_songs(&mut self, _path: &str) -> MpdResult<Vec<Song>> {
         Err(MpdError::Generic(
             "Recursive selections are not supported by this server".into(),
@@ -421,55 +426,39 @@ pub trait MpdClient: Sized {
 }
 
 impl Client<'_> {
-    pub fn toggle_liked_tracks(&mut self, uris: &[String]) -> MpdResult<(usize, usize)> {
-        self.with_catalog_timeout(|client| {
-            let mut added = 0;
-            let mut removed = 0;
-            for chunk in uris.chunks(1000) {
-                let args = chunk.iter().map(|uri| uri.quote_and_escape()).join(" ");
-                client.execute(&format!("rspc_library_toggle {args}"))?;
-                let values: MpdList = client.read_response()?;
-                let [add_count, remove_count] = values.0.as_slice() else {
-                    return Err(MpdError::Parse("missing Liked Songs toggle counts".into()));
-                };
-                let parse = |value: &str| {
-                    value
-                        .parse::<usize>()
-                        .map_err(|error| MpdError::Parse(error.to_string()))
-                };
-                added += parse(add_count)?;
-                removed += parse(remove_count)?;
-            }
-            Ok((added, removed))
-        })
-    }
-
-    fn update_liked_tracks(&mut self, uris: &[String], remove: bool) -> MpdResult<usize> {
+    pub(crate) fn edit_liked_tracks(
+        &mut self,
+        uris: &[String],
+        edit: LikedSongsEdit,
+    ) -> MpdResult<(usize, usize)> {
         if uris.iter().any(|uri| !uri.starts_with("spotify:track:")) {
             return Err(MpdError::Generic(
                 "Liked Songs accepts Spotify tracks only".into(),
             ));
         }
         self.with_catalog_timeout(|client| {
-            let command = if remove {
-                "rspc_library_remove"
-            } else {
-                "rspc_library_add"
+            let parse_count = |value: &str| {
+                value
+                    .parse::<usize>()
+                    .map_err(|error| MpdError::Parse(error.to_string()))
             };
-            let mut total = 0;
+            let command = edit.command();
+            let (mut added, mut removed) = (0, 0);
             for chunk in uris.chunks(1000) {
                 let args = chunk.iter().map(|uri| uri.quote_and_escape()).join(" ");
                 client.execute(&format!("{command} {args}"))?;
                 let values: MpdList = client.read_response()?;
-                let added = values
-                    .0
-                    .first()
-                    .ok_or_else(|| MpdError::Parse("missing library update count".into()))?;
-                total += added
-                    .parse::<usize>()
-                    .map_err(|error| MpdError::Parse(error.to_string()))?;
+                match (edit, values.0.as_slice()) {
+                    (LikedSongsEdit::Add, [count]) => added += parse_count(count)?,
+                    (LikedSongsEdit::Remove, [count]) => removed += parse_count(count)?,
+                    (LikedSongsEdit::Toggle, [add_count, remove_count]) => {
+                        added += parse_count(add_count)?;
+                        removed += parse_count(remove_count)?;
+                    }
+                    _ => return Err(MpdError::Parse("invalid Liked Songs update counts".into())),
+                }
             }
-            Ok(total)
+            Ok((added, removed))
         })
     }
 }
@@ -509,14 +498,6 @@ impl MpdClient for Client<'_> {
                 .parse::<usize>()
                 .map_err(|error| MpdError::Parse(error.to_string()))
         })
-    }
-
-    fn add_liked_tracks(&mut self, uris: &[String]) -> MpdResult<usize> {
-        self.update_liked_tracks(uris, false)
-    }
-
-    fn remove_liked_tracks(&mut self, uris: &[String]) -> MpdResult<usize> {
-        self.update_liked_tracks(uris, true)
     }
 
     fn selection_songs(&mut self, path: &str) -> MpdResult<Vec<Song>> {

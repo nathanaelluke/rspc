@@ -613,7 +613,10 @@ async fn library_browsers_distinguish_album_artists_and_guest_performers() {
         ["Playlist Album"]
     );
     let tracks = catalog
-        .spotify_find("(AlbumArtist == 'Various Artists')", false)
+        .spotify_find(
+            &filter::parse("(AlbumArtist == 'Various Artists')").unwrap(),
+            false,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -623,7 +626,10 @@ async fn library_browsers_distinguish_album_artists_and_guest_performers() {
     );
     assert!(
         catalog
-            .spotify_find("(AlbumArtist == 'Guest Performer')", false)
+            .spotify_find(
+                &filter::parse("(AlbumArtist == 'Guest Performer')").unwrap(),
+                false
+            )
             .await
             .unwrap()
             .is_empty()
@@ -676,7 +682,10 @@ async fn album_and_album_artist_roots_only_use_saved_albums() {
     );
     assert_eq!(
         catalog
-            .spotify_find("(AlbumArtist == 'Saved Album Artist')", false)
+            .spotify_find(
+                &filter::parse("(AlbumArtist == 'Saved Album Artist')").unwrap(),
+                false
+            )
             .await
             .unwrap()
             .len(),
@@ -684,14 +693,20 @@ async fn album_and_album_artist_roots_only_use_saved_albums() {
     );
     assert!(
         catalog
-            .spotify_find("(Album == 'Liked-only Album')", false)
+            .spotify_find(
+                &filter::parse("(Album == 'Liked-only Album')").unwrap(),
+                false
+            )
             .await
             .unwrap()
             .is_empty()
     );
     assert_eq!(
         catalog
-            .spotify_find("(Album == 'Playlist Album')", false)
+            .spotify_find(
+                &filter::parse("(Album == 'Playlist Album')").unwrap(),
+                false
+            )
             .await
             .unwrap()
             .len(),
@@ -700,7 +715,10 @@ async fn album_and_album_artist_roots_only_use_saved_albums() {
     );
     assert!(
         catalog
-            .spotify_find("(AlbumArtist == 'Liked-only Artist')", false)
+            .spotify_find(
+                &filter::parse("(AlbumArtist == 'Liked-only Artist')").unwrap(),
+                false
+            )
             .await
             .unwrap()
             .is_empty()
@@ -743,7 +761,10 @@ async fn artists_use_full_catalog_even_with_liked_tracks_without_changing_saved_
         .await;
     *catalog.cooldown.lock().await = Some(std::time::Instant::now() + Duration::from_secs(60));
     let tracks = catalog
-        .spotify_find("(Artist == 'The Backyardigans')", false)
+        .spotify_find(
+            &filter::parse("(Artist == 'The Backyardigans')").unwrap(),
+            false,
+        )
         .await
         .unwrap();
     assert_eq!(tracks.len(), 2);
@@ -759,14 +780,17 @@ async fn artists_use_full_catalog_even_with_liked_tracks_without_changing_saved_
     }
     assert!(
         catalog
-            .spotify_find("(AlbumArtist == 'The Backyardigans')", false)
+            .spotify_find(
+                &filter::parse("(AlbumArtist == 'The Backyardigans')").unwrap(),
+                false
+            )
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
         catalog
-            .spotify_find("(Artist == 'Unfollowed')", false)
+            .spotify_find(&filter::parse("(Artist == 'Unfollowed')").unwrap(), false)
             .await
             .unwrap()
             .is_empty()

@@ -532,7 +532,11 @@ async fn startup_volume_waits_for_the_output_mixer() {
     let (client, mut server) = UnixStream::pair().unwrap();
     let task = tokio::spawn(async move {
         let mut server = BufStream::new(&mut server);
-        for reply in ["ACK [5@0] {setvol} All outputs are disabled\n", "OK\n"] {
+        for reply in [
+            "ACK [5@0] {setvol} All outputs are disabled\n",
+            "ACK [5@0] {setvol} Failed to set mixer for \"Fixture output\"; disconnected\n",
+            "OK\n",
+        ] {
             let mut command = String::new();
             server.read_line(&mut command).await.unwrap();
             assert_eq!(command, "setvol 40\n");
@@ -598,7 +602,7 @@ async fn startup_volume_stops_retrying_if_the_mixer_never_opens() {
 async fn check_load_volume(
     previous_status: Option<&str>,
     volume_before_play: Option<u8>,
-    deferred: bool,
+    deferred: Option<&str>,
     position_ms: u64,
     restores_old_volume: bool,
 ) {
@@ -630,12 +634,7 @@ async fn check_load_volume(
     if let Some(volume) = volume_before_play {
         commands.push((
             format!("setvol {volume}"),
-            if deferred {
-                "ACK [5@0] {setvol} All outputs are disabled\n"
-            } else {
-                "OK\n"
-            }
-            .into(),
+            deferred.unwrap_or("OK\n").into(),
         ));
     }
     commands.push((
@@ -646,7 +645,7 @@ async fn check_load_volume(
         },
         "OK\n".into(),
     ));
-    if deferred {
+    if deferred.is_some() {
         commands.push((
             format!("setvol {}", volume_before_play.unwrap()),
             "OK\n".into(),
@@ -726,7 +725,12 @@ async fn check_load_volume(
 
 #[tokio::test]
 async fn first_local_load_defers_volume_until_hardware_mixer_opens() {
-    check_load_volume(None, Some(40), true, 0, false).await;
+    for response in [
+        "ACK [5@0] {setvol} All outputs are disabled\n",
+        "ACK [5@0] {setvol} Failed to set mixer for \"Fixture output\"; disconnected\n",
+    ] {
+        check_load_volume(None, Some(40), Some(response), 0, false).await;
+    }
 }
 
 #[tokio::test]
@@ -734,7 +738,7 @@ async fn local_track_changes_preserve_desktop_volume_and_resume_offset() {
     check_load_volume(
         Some("volume: 73\nstate: pause\n"),
         Some(73),
-        false,
+        None,
         1234,
         false,
     )
@@ -743,12 +747,12 @@ async fn local_track_changes_preserve_desktop_volume_and_resume_offset() {
 
 #[tokio::test]
 async fn natural_track_end_does_not_restore_stale_engine_volume() {
-    check_load_volume(Some("volume: -1\nstate: stop\n"), None, false, 0, false).await;
+    check_load_volume(Some("volume: -1\nstate: stop\n"), None, None, 0, false).await;
 }
 
 #[tokio::test]
 async fn startup_reapplies_volume_when_the_reopened_mixer_restores_an_old_level() {
-    check_load_volume(None, Some(40), false, 0, true).await;
+    check_load_volume(None, Some(40), None, 0, true).await;
 }
 
 #[test]

@@ -97,7 +97,7 @@ async fn queued_play_ids_survive_an_earlier_queue_reorder() {
         .lock()
         .await
         .queue
-        .move_range(1, 2, 0)
+        .move_range(1, 2, "0")
         .unwrap();
     drop(control);
     pending.await.unwrap().unwrap();
@@ -701,7 +701,7 @@ async fn shuffle_queue_edits_preserve_order_and_add_new_ids() {
     assert_eq!(pending[0], 2);
     assert_eq!(shuffle_ids(&pending[1..]), shuffle_ids(&added));
     engine
-        .edit_queue(|queue| queue.move_range(0, 2, 3))
+        .edit_queue(|queue| queue.move_range(0, 2, "3"))
         .await
         .unwrap();
     assert_eq!(shuffle_pending(&engine).await, pending);

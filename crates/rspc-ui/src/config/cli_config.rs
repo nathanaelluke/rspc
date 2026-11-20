@@ -1,8 +1,11 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Config, ConfigFile, MpdAddress, address::MpdPassword, utils::tilde_expand};
+use super::{
+    Config, ConfigFile, DEFAULT_MPD_READ_TIMEOUT_MS, DEFAULT_MPD_WRITE_TIMEOUT_MS, MpdAddress,
+    address::MpdPassword, utils::tilde_expand,
+};
 use crate::config::utils::tilde_expand_path;
 
 #[derive(derive_more::Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -13,6 +16,8 @@ pub struct CliConfigFile {
     password: Option<String>,
     cache_dir: Option<PathBuf>,
     lyrics_dir: Option<String>,
+    mpd_read_timeout_ms: u64,
+    mpd_write_timeout_ms: u64,
 }
 
 impl Default for CliConfigFile {
@@ -22,6 +27,8 @@ impl Default for CliConfigFile {
             password: None,
             cache_dir: None,
             lyrics_dir: None,
+            mpd_read_timeout_ms: DEFAULT_MPD_READ_TIMEOUT_MS,
+            mpd_write_timeout_ms: DEFAULT_MPD_WRITE_TIMEOUT_MS,
         }
     }
 }
@@ -32,6 +39,8 @@ pub struct CliConfig {
     pub password: Option<MpdPassword>,
     pub cache_dir: Option<PathBuf>,
     pub lyrics_dir: Option<String>,
+    pub mpd_read_timeout: Duration,
+    pub mpd_write_timeout: Duration,
 }
 
 impl Default for CliConfig {
@@ -47,6 +56,8 @@ impl From<ConfigFile> for CliConfigFile {
             password: value.password,
             cache_dir: value.cache_dir,
             lyrics_dir: value.lyrics_dir,
+            mpd_read_timeout_ms: value.mpd_read_timeout_ms,
+            mpd_write_timeout_ms: value.mpd_write_timeout_ms,
         }
     }
 }
@@ -58,6 +69,8 @@ impl From<Config> for CliConfig {
             password: value.password,
             cache_dir: value.cache_dir,
             lyrics_dir: value.lyrics_dir,
+            mpd_read_timeout: value.mpd_read_timeout,
+            mpd_write_timeout: value.mpd_write_timeout,
         }
     }
 }
@@ -69,6 +82,8 @@ impl From<&Config> for CliConfig {
             password: value.password.clone(),
             cache_dir: value.cache_dir.clone(),
             lyrics_dir: value.lyrics_dir.clone(),
+            mpd_read_timeout: value.mpd_read_timeout,
+            mpd_write_timeout: value.mpd_write_timeout,
         }
     }
 }
@@ -94,6 +109,8 @@ impl CliConfigFile {
             }),
             address,
             password,
+            mpd_read_timeout: Duration::from_millis(self.mpd_read_timeout_ms),
+            mpd_write_timeout: Duration::from_millis(self.mpd_write_timeout_ms),
         }
     }
 }

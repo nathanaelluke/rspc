@@ -45,7 +45,7 @@ use super::{
     utils::tilde_expand,
 };
 
-const DEFAULT_ART: &[u8; 58599] = include_bytes!("../../../assets/default.jpg");
+const DEFAULT_ART: &[u8] = include_bytes!("../../../assets/default.png");
 
 #[derive(derive_more::Debug, Clone)]
 pub struct UiConfig {
@@ -467,7 +467,7 @@ impl TryFrom<UiConfigFile> for UiConfig {
             highlighted_item_style: value.highlighted_item_style.to_config_or(None, None)?,
             current_item_style: value.current_item_style.to_config_or(None, None)?,
             default_album_art: value.default_album_art_path.map_or(
-                Ok(DEFAULT_ART as &'static [u8]),
+                Ok(DEFAULT_ART),
                 |path| -> Result<_> {
                     let path = tilde_expand(&path);
                     Ok(std::fs::read(path.as_ref())?.leak())

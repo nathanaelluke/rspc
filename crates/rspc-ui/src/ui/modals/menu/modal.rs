@@ -50,6 +50,13 @@ impl Modal for MenuModal<'_> {
         self.id
     }
 
+    fn owns_input_buffer(&self, id: BufferId) -> bool {
+        id == self.filter_buffer_id
+            || self.sections.iter().any(
+                |section| matches!(section, SectionType::Input(input) if input.buffer_id == id),
+            )
+    }
+
     fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
         let mut changed = false;
         for (index, section) in self.sections.iter_mut().enumerate() {

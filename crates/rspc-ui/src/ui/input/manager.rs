@@ -37,11 +37,9 @@ impl InputManager {
     }
 
     pub fn create_buffer(&self, id: BufferId, initial_value: Option<&str>) {
-        self.buffers.borrow_mut().remove(&id);
         self.buffers
             .borrow_mut()
-            .entry(id)
-            .or_insert(InputBuffer::new(initial_value));
+            .insert(id, InputBuffer::new(initial_value));
     }
 
     pub fn as_spans(
@@ -73,7 +71,9 @@ impl InputManager {
     }
 
     pub fn destroy_buffer(&self, id: BufferId) {
-        self.normal_mode();
+        if self.is_active(id) {
+            self.normal_mode();
+        }
         self.buffers.borrow_mut().remove(&id);
     }
 

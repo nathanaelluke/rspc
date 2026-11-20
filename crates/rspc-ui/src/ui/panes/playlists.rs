@@ -414,11 +414,10 @@ impl BrowserPane<DirOrSong> for PlaylistsPane {
                 let current_name = d.clone();
                 modal!(
                     ctx,
-                    InputModal::new(ctx)
+                    InputModal::with_value(ctx, &current_name)
                         .title("Rename playlist")
                         .confirm_label("Rename")
                         .input_label("New name:")
-                        .initial_value(current_name.clone())
                         .on_confirm(move |ctx, new_value| {
                             if current_name != new_value {
                                 let current_name = current_name.clone();
