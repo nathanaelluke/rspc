@@ -47,8 +47,12 @@ fn assert_info(mut pane: impl BrowserPane<DirOrSong>, ctx: &mut Ctx, events: &Re
         .expect("render");
     let buffer = terminal.backend().buffer();
     let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
-    assert!(text.contains("outside-queue.flac"));
-    assert!(text.contains("Library song"));
+    // Song info may wrap values to honor its configured aspect ratio.
+    assert!(
+        text.contains("outside-") && text.contains("queue.flac"),
+        "{text}"
+    );
+    assert!(text.contains("Library") && text.contains("song"), "{text}");
 }
 
 #[rstest]

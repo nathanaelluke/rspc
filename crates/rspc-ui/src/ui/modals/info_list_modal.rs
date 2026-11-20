@@ -45,6 +45,7 @@ pub struct InfoListModal {
     pending: Option<InfoRequest>,
     loading: bool,
     min_rows: usize,
+    layout_cache: Option<(Rect, Option<f64>, Rect)>,
 }
 
 #[derive(Debug)]
@@ -91,6 +92,7 @@ impl InfoListModal {
             pending: None,
             loading: false,
             min_rows: 0,
+            layout_cache: None,
         }
     }
 
@@ -184,6 +186,72 @@ impl InfoListModal {
         }
         self.wrap_widths = Some(widths);
     }
+
+    fn popup_area(&mut self, area: Rect, columns_per_row: Option<f64>) -> Rect {
+        if self.wrap_widths.is_some()
+            && let Some((cached_area, cached_ratio, popup)) = self.layout_cache
+            && cached_area == area
+            && cached_ratio == columns_per_row
+        {
+            return popup;
+        }
+        let (w, h) = self.size;
+        let max_area = area.centered(constraint!(==w%), constraint!(==h%));
+        let height_at = |modal: &mut Self, width| {
+            let content = Rect::new(0, 0, width, max_area.height).inner(Margin {
+                horizontal: 2,
+                vertical: 1,
+            });
+            let columns = Layout::horizontal(
+                modal
+                    .column_widths
+                    .iter()
+                    .map(|width| Constraint::Percentage(*width)),
+            )
+            .spacing(2)
+            .split(content);
+            modal.wrap_rows((columns[0].width, columns[1].width));
+            max_area.height.min(
+                modal
+                    .wrapped_rows
+                    .len()
+                    .max(modal.min_rows)
+                    .saturating_add(4)
+                    .min(u16::MAX as usize) as u16,
+            )
+        };
+        let mut width = max_area.width;
+        if let Some(ratio) = columns_per_row {
+            // Width increases while wrapped height decreases. Find the widest
+            // fitting layout without oscillating between wrap widths.
+            let (mut low, mut high) = (1u32, u32::from(width));
+            width = width.min(1);
+            while low <= high {
+                let candidate = low.midpoint(high) as u16;
+                let height = height_at(self, candidate);
+                if f64::from(candidate) <= f64::from(height) * ratio {
+                    width = candidate;
+                    low = u32::from(candidate) + 1;
+                } else {
+                    high = u32::from(candidate) - 1;
+                }
+            }
+        }
+        let height = height_at(self, width);
+        let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
+        self.layout_cache = Some((area, columns_per_row, popup));
+        popup
+    }
+}
+
+fn terminal_columns_per_row() -> f64 {
+    crossterm::terminal::window_size()
+        .ok()
+        .filter(|size| size.width > 0 && size.height > 0 && size.columns > 0 && size.rows > 0)
+        .map_or(2.0, |size| {
+            (f64::from(size.height) / f64::from(size.rows))
+                / (f64::from(size.width) / f64::from(size.columns))
+        })
 }
 
 impl Modal for InfoListModal {
@@ -210,32 +278,18 @@ impl Modal for InfoListModal {
                 Ok(MpdQueryResult::SelectionInfo { modal, items })
             });
         }
-        let (w, h) = self.size;
-        let max_area = frame.area().centered(constraint!(==w%), constraint!(==h%));
+        let columns_per_row = self
+            .items
+            .song_file
+            .as_ref()
+            .and(ctx.config.song_info_max_aspect_ratio)
+            .map(|ratio| ratio * terminal_columns_per_row());
+        let popup_area = self.popup_area(frame.area(), columns_per_row);
         let column_constraints = self
             .column_widths
             .iter()
             .map(|w| Constraint::Percentage(*w))
             .collect_vec();
-        let content = max_area.inner(Margin {
-            horizontal: 2,
-            vertical: 1,
-        });
-        let columns = Layout::horizontal(&column_constraints)
-            .spacing(2)
-            .split(content);
-        self.wrap_rows((columns[0].width, columns[1].width));
-        let height = max_area.height.min(
-            self.wrapped_rows
-                .len()
-                .max(self.min_rows)
-                .saturating_add(4)
-                .min(u16::MAX as usize) as u16,
-        );
-        let popup_area = frame.area().centered(
-            Constraint::Length(max_area.width),
-            Constraint::Length(height),
-        );
         frame.render_widget(Clear, popup_area);
         if let Some(bg_color) = ctx.config.theme.modal_background_color {
             frame.render_widget(
@@ -553,6 +607,112 @@ mod tests {
     use crossbeam::channel::{Receiver, Sender};
     use ratatui::{Terminal, backend::TestBackend};
     use rstest::rstest;
+    use std::sync::Arc;
+
+    fn song_info_fixture() -> InfoListModal {
+        InfoListModal::builder()
+            .items(KeyValues {
+                entries: vec![
+                    KeyValue {
+                        key: "Title".into(),
+                        value: "A song title".into(),
+                    },
+                    KeyValue {
+                        key: "Artist".into(),
+                        value: "An artist with a sufficiently long name to wrap on narrow displays"
+                            .into(),
+                    },
+                    KeyValue {
+                        key: "Album".into(),
+                        value: "An album title".into(),
+                    },
+                    KeyValue {
+                        key: "File".into(),
+                        value: "mpd:Music/Artist/Album/01 A song title.flac".into(),
+                    },
+                ],
+                song_file: Some("mpd:fixture.flac".into()),
+            })
+            .title("Song info")
+            .column_widths(&[30, 70])
+            .build()
+    }
+
+    #[test]
+    fn ultrawide_song_info_limits_its_actual_aspect_ratio_and_caches_layout() {
+        let mut modal = song_info_fixture();
+        let screen = Rect::new(0, 0, 400, 60);
+        let popup = modal.popup_area(screen, Some(4.0));
+        assert!(f64::from(popup.width) <= f64::from(popup.height) * 4.0);
+        assert!(popup.width < 320);
+        assert!(popup.x.abs_diff(screen.width - popup.right()) <= 1);
+        assert!(popup.y.abs_diff(screen.height - popup.bottom()) <= 1);
+        assert_eq!(
+            modal
+                .row_items
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .len(),
+            4
+        );
+        let rows = modal.wrapped_rows.as_ptr();
+        assert_eq!(modal.popup_area(screen, Some(4.0)), popup);
+        assert_eq!(modal.wrapped_rows.as_ptr(), rows);
+        let narrow = modal.popup_area(screen, Some(2.0));
+        assert!(narrow.width <= popup.width);
+        assert!(f64::from(narrow.width) <= f64::from(narrow.height) * 2.0);
+        assert_eq!(modal.popup_area(screen, None).width, 320);
+        for (index, item) in modal.items.entries.iter().enumerate() {
+            let wrapped: String = modal
+                .row_items
+                .iter()
+                .zip(&modal.wrapped_rows)
+                .filter(|(item_index, _)| **item_index == index)
+                .flat_map(|(_, row)| row[1].chars())
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            assert_eq!(
+                wrapped,
+                item.value
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .collect::<String>()
+            );
+        }
+    }
+
+    #[rstest]
+    fn song_info_ratio_applies_through_config_and_survives_resizes(mut ctx: Ctx) {
+        let mut modal = song_info_fixture();
+        let mut terminal = Terminal::new(TestBackend::new(400, 60)).expect("test terminal");
+        Arc::make_mut(&mut ctx.config).song_info_max_aspect_ratio = Some(1.0);
+        for (width, height) in [(400, 60), (80, 24), (20, 60), (1, 1), (400, 60)] {
+            terminal.backend_mut().resize(width, height);
+            terminal
+                .resize(Rect::new(0, 0, width, height))
+                .expect("resize terminal");
+            terminal
+                .draw(|frame| modal.render(frame, &mut ctx).expect("render song info"))
+                .expect("draw song info");
+            let popup = modal.layout_cache.expect("computed layout").2;
+            assert!(popup.right() <= width && popup.bottom() <= height);
+            if width > 1 && height > 1 {
+                assert!(
+                    f64::from(popup.width) <= f64::from(popup.height) * terminal_columns_per_row()
+                );
+            }
+        }
+        Arc::make_mut(&mut ctx.config).song_info_max_aspect_ratio = None;
+        terminal
+            .draw(|frame| {
+                modal
+                    .render(frame, &mut ctx)
+                    .expect("render without aspect limit");
+            })
+            .expect("draw without aspect limit");
+        assert_eq!(modal.layout_cache.expect("computed layout").2.width, 320);
+    }
 
     #[rstest]
     fn a_wrapped_artist_row_opens_the_complete_artist_name(

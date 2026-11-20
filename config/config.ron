@@ -4,6 +4,7 @@
 (
     theme: Some("default"),
     volume_step: 5,
+    song_info_max_aspect_ratio: Some(2.0),
     album_art: (method: Auto, vertical_align: Top),
     enable_lyrics_index: false,
     enable_lyrics_hot_reload: false,

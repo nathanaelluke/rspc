@@ -56,6 +56,7 @@ pub struct Config {
     pub enable_lyrics_hot_reload: bool,
     pub volume_step: u8,
     pub max_fps: u32,
+    pub song_info_max_aspect_ratio: Option<f64>,
     pub scrolloff: usize,
     pub wrap_navigation: bool,
     pub keybinds: KeyConfig,
@@ -123,6 +124,7 @@ pub struct ConfigFile {
     pub theme: Option<String>,
     volume_step: u8,
     pub max_fps: u32,
+    pub song_info_max_aspect_ratio: Option<f64>,
     scrolloff: usize,
     wrap_navigation: bool,
     status_update_interval_ms: Option<u64>,
@@ -197,6 +199,7 @@ impl Default for ConfigFile {
             mpd_read_timeout_ms: 10_000,
             mpd_idle_read_timeout_ms: None,
             max_fps: 30,
+            song_info_max_aspect_ratio: Some(2.0),
             theme: None,
             cache_dir: None,
             lyrics_dir: None,
@@ -279,6 +282,11 @@ impl ConfigFile {
         password_cli: Option<String>,
         skip_album_art_check: bool,
     ) -> Result<Config> {
+        anyhow::ensure!(
+            self.song_info_max_aspect_ratio
+                .is_none_or(|ratio| ratio.is_finite() && ratio > 0.0),
+            "song_info_max_aspect_ratio must be a finite positive number, or None"
+        );
         let original_tabs_definition = self.tabs.clone();
         let tabs: Tabs = self
             .tabs
@@ -309,6 +317,7 @@ impl ConfigFile {
             password,
             volume_step: self.volume_step,
             max_fps: self.max_fps,
+            song_info_max_aspect_ratio: self.song_info_max_aspect_ratio,
             scrolloff: self.scrolloff,
             wrap_navigation: self.wrap_navigation,
             status_update_interval_ms: self.status_update_interval_ms.map(|v| v.max(100)),
@@ -580,6 +589,37 @@ mod tests {
     #[cfg(debug_assertions)]
     use crate::config::keys::KeyConfigFile;
     use crate::config::{ConfigFile, theme::UiConfigFile};
+
+    #[test]
+    fn song_info_aspect_ratio_defaults_can_be_overridden_or_disabled() {
+        for (text, expected) in [
+            ("()", Some(2.0)),
+            ("(song_info_max_aspect_ratio: Some(1.5))", Some(1.5)),
+            ("(song_info_max_aspect_ratio: None)", None),
+        ] {
+            let config: ConfigFile = ron::from_str(text).unwrap();
+            assert_eq!(
+                config
+                    .into_config(super::UiConfig::default(), None, None, true)
+                    .unwrap()
+                    .song_info_max_aspect_ratio,
+                expected
+            );
+        }
+        for ratio in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let config = ConfigFile {
+                song_info_max_aspect_ratio: Some(ratio),
+                ..Default::default()
+            };
+            assert!(
+                config
+                    .into_config(super::UiConfig::default(), None, None, true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("song_info_max_aspect_ratio")
+            );
+        }
+    }
 
     #[test]
     #[cfg(debug_assertions)]
