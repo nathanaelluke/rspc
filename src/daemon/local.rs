@@ -23,6 +23,8 @@ use tokio::{
 pub const ROOT: &str = "Local Files";
 pub const PLAYLISTS: &str = "Local Playlists/";
 const PARTITION: &str = "rspc";
+pub(super) const DEFAULT_BINARY_LIMIT: usize = 8192;
+pub(super) const MAX_ARTWORK_CHUNK: usize = 1024 * 1024;
 
 #[derive(Clone, Deserialize)]
 #[serde(default)]
@@ -97,6 +99,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 struct Wire {
     stream: BufStream<Box<dyn Io>>,
     synchronized: bool,
+    binary_limit: Option<usize>,
 }
 #[derive(Debug)]
 struct CommandFailure(String);
@@ -138,6 +141,7 @@ impl Wire {
         Self {
             stream: BufStream::new(stream),
             synchronized: true,
+            binary_limit: Some(DEFAULT_BINARY_LIMIT),
         }
     }
     async fn open(settings: &Settings) -> Result<Self> {
@@ -200,6 +204,17 @@ impl Wire {
                 .is_some_and(|error| error.is::<CommandFailure>());
         result
     }
+    async fn set_binary_limit(&mut self, limit: usize) -> Result<()> {
+        if self.binary_limit.is_some_and(|current| current != limit) {
+            self.binary_limit = match self.command(&format!("binarylimit {limit}")).await {
+                Ok(_) => Some(limit),
+                Err(error) if error.is::<CommandFailure>() => None,
+                Err(error) => return Err(error),
+            };
+        }
+        Ok(())
+    }
+
     async fn volume(&mut self, volume: u8, starting: bool) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -247,7 +262,7 @@ impl Wire {
                 .transpose()?;
             out.extend(line);
             if let Some(n) = binary {
-                ensure!(n <= 1024 * 1024, "MPD binary chunk is too large");
+                ensure!(n <= MAX_ARTWORK_CHUNK, "MPD binary chunk is too large");
                 let start = out.len();
                 out.resize(start + n + 1, 0);
                 self.stream.read_exact(&mut out[start..]).await?;
@@ -417,6 +432,22 @@ impl Library {
         });
     }
     pub async fn request(&self, command: &str) -> Result<Vec<u8>> {
+        self.request_inner(command, None).await
+    }
+    pub async fn artwork(
+        &self,
+        command: &str,
+        file: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<u8>> {
+        self.request_inner(
+            &format!("{command} {} {offset}", quote(file)?),
+            Some(limit.clamp(DEFAULT_BINARY_LIMIT, MAX_ARTWORK_CHUNK)),
+        )
+        .await
+    }
+    async fn request_inner(&self, command: &str, binary_limit: Option<usize>) -> Result<Vec<u8>> {
         let mut slot = self.wire.lock().await;
         let read_only = matches!(
             command.split_ascii_whitespace().next(),
@@ -447,7 +478,14 @@ impl Library {
                     "Local MPD unavailable; check RSPC_MPD_ADDRESS or your rmpc config",
                 )?);
             }
-            let result = slot.as_mut().unwrap().command(command).await;
+            let wire = slot.as_mut().unwrap();
+            let result = async {
+                if let Some(limit) = binary_limit {
+                    wire.set_binary_limit(limit).await?;
+                }
+                wire.command(command).await
+            }
+            .await;
             if let Err(error) = &result {
                 slot.take();
                 // Reads may be replayed after MPD expires an idle socket.

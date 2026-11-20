@@ -8,7 +8,7 @@ use super::{
     Backend,
     block::Block,
     iterm2::Iterm2,
-    kitty::Kitty,
+    kitty::{self, Kitty},
     sixel::Sixel,
     ueberzug::{Layer, Ueberzug},
 };
@@ -29,12 +29,15 @@ pub struct AlbumArtFacade {
     in_flight: Option<ImageRequest>,
     desired: Option<ImageRequest>,
     prepared: Option<(ImageRequest, EncodeData)>,
+    previous_kitty: Option<(ImageRequest, EncodeData)>,
     displayed_area: Option<Rect>,
     hide_pending: bool,
     display_pending: bool,
     revision: u64,
     presentation: Presentation,
 }
+
+const MAX_PREVIOUS_COVER_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Presentation {
@@ -146,6 +149,7 @@ impl AlbumArtFacade {
             in_flight: None,
             desired: None,
             prepared: None,
+            previous_kitty: None,
             displayed_area: None,
             hide_pending: false,
             display_pending: false,
@@ -227,6 +231,9 @@ impl AlbumArtFacade {
             method: self.render_method(),
         };
         self.desired = Some(request.clone());
+        if let Some((key, data)) = self.previous_kitty.take_if(|(key, _)| key == &request) {
+            self.replace_prepared(key, data);
+        }
         let ready = self
             .prepared
             .as_ref()
@@ -291,7 +298,7 @@ impl AlbumArtFacade {
             return Ok(());
         };
         if self.desired.as_ref() == Some(&request) {
-            self.prepared = Some((request, data));
+            self.replace_prepared(request, data);
             self.display_pending = self.is_showing;
             if self.display_pending {
                 ctx.render()?;
@@ -300,6 +307,17 @@ impl AlbumArtFacade {
             self.encode_latest()?;
         }
         Ok(())
+    }
+
+    fn replace_prepared(&mut self, request: ImageRequest, data: EncodeData) {
+        let previous = self.prepared.replace((request, data));
+        if let Some((key, EncodeData::Kitty(data))) = previous
+            && key.revision == self.revision
+            && let kitty::Data::ImageData(image) = data.as_ref()
+            && key.data.len().saturating_add(image.encoded_len()) <= MAX_PREVIOUS_COVER_BYTES
+        {
+            self.previous_kitty = Some((key, EncodeData::Kitty(data)));
+        }
     }
 
     pub fn hide(&mut self, ctx: &Ctx) -> Result<()> {
@@ -440,6 +458,7 @@ impl AlbumArtFacade {
 
     pub fn resize(&mut self, area: Rect, ctx: &Ctx) -> Result<()> {
         self.revision = self.revision.wrapping_add(1);
+        self.previous_kitty = None;
         self.last_size = area;
         self.hide_pending = self.displayed_area.is_some();
         self.show_current(ctx)
@@ -530,6 +549,31 @@ mod tests {
             "cached cover must not be recompressed"
         );
         assert!(facade.display_pending);
+    }
+
+    #[rstest]
+    fn alternating_kitty_covers_reuses_the_previous_encode(
+        mut ctx: Ctx,
+        work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
+    ) {
+        ctx.work_sender = work_request_channel.0.clone();
+        let mut facade = configured(&mut ctx);
+        let original = ctx.config.theme.default_album_art.to_vec();
+        let mut distinct = original.clone();
+        distinct.push(0);
+
+        facade.show(original.clone(), &ctx).expect("first cover");
+        complete(&work_request_channel.1, &mut facade, &ctx);
+        facade.show(distinct.clone(), &ctx).expect("second cover");
+        complete(&work_request_channel.1, &mut facade, &ctx);
+
+        for data in [original, distinct] {
+            facade.show(data.clone(), &ctx).expect("return to cover");
+            assert!(facade.display_pending);
+            assert!(work_request_channel.1.is_empty());
+            let (request, _) = facade.prepared.as_ref().expect("prepared cover");
+            assert_eq!(request.data.as_ref(), &data);
+        }
     }
 
     #[rstest]

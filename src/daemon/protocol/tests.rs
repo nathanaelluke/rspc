@@ -123,6 +123,7 @@ async fn binary_limits_are_per_client_and_preserve_artwork_offsets_and_framing()
     let data: Vec<u8> = (0..20000).map(|i| i as u8).collect();
     let artwork = data.clone();
     let peer = tokio::spawn(async move {
+        let mut negotiated = Vec::new();
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
         let mut read = BufReader::new(read);
@@ -133,6 +134,11 @@ async fn binary_limits_are_per_client_and_preserve_artwork_offsets_and_framing()
                 break;
             }
             let args = words(&line).unwrap();
+            if args[0] == "binarylimit" {
+                negotiated.push(args[1].parse::<usize>().unwrap());
+                write.write_all(b"OK\n").await.unwrap();
+                continue;
+            }
             assert!(matches!(args[0].as_str(), "albumart" | "readpicture"));
             assert_eq!(args[1], "fixture.flac");
             let offset: usize = args[2].parse().unwrap();
@@ -151,6 +157,7 @@ async fn binary_limits_are_per_client_and_preserve_artwork_offsets_and_framing()
             write.write_all(chunk).await.unwrap();
             write.write_all(b"\nOK\n").await.unwrap();
         }
+        assert_eq!(negotiated, [262144, 8192]);
     });
     let (mut read, mut write, task) = framing_client(Arc::clone(&engine)).await;
     let (mut other_read, mut other_write, other_task) = framing_client(Arc::clone(&engine)).await;
@@ -183,6 +190,24 @@ async fn binary_limits_are_per_client_and_preserve_artwork_offsets_and_framing()
     expected.extend_from_slice(&data[..64]);
     expected.extend_from_slice(b"\nlist_OK\nlist_OK\nOK\n");
     assert_eq!(framing_reply(&mut read).await, expected);
+    write
+        .write_all(b"binarylimit 262144\nreadpicture mpd:fixture.flac 0\nping\n")
+        .await
+        .unwrap();
+    assert_eq!(framing_reply(&mut read).await, b"OK\n");
+    let mut expected = b"size: 20000\ntype: image/png\nbinary: 20000\n".to_vec();
+    expected.extend_from_slice(&data);
+    expected.extend_from_slice(b"\nOK\n");
+    assert_eq!(framing_reply(&mut read).await, expected);
+    assert_eq!(framing_reply(&mut read).await, b"OK\n");
+    other_write
+        .write_all(b"readpicture mpd:fixture.flac 0\n")
+        .await
+        .unwrap();
+    let mut expected = b"size: 20000\ntype: image/png\nbinary: 8192\n".to_vec();
+    expected.extend_from_slice(&data[..8192]);
+    expected.extend_from_slice(b"\nOK\n");
+    assert_eq!(framing_reply(&mut other_read).await, expected);
     write.write_all(b"close\n").await.unwrap();
     other_write.write_all(b"close\n").await.unwrap();
     task.await.unwrap().unwrap();

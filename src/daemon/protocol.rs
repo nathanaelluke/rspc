@@ -165,7 +165,6 @@ const COMMANDS: &[&str] = &[
 const MAX_COMMAND_BYTES: usize = 65_536;
 const MAX_COMMAND_LIST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_COMMAND_LIST_LENGTH: usize = 10_000;
-const DEFAULT_BINARY_LIMIT: usize = 8192;
 const MIN_BINARY_LIMIT: usize = 64;
 const MAX_BINARY_LIMIT: usize = 8_400_896;
 
@@ -176,7 +175,7 @@ struct ClientState {
 impl ClientState {
     fn new() -> Self {
         Self {
-            binary_limit: DEFAULT_BINARY_LIMIT,
+            binary_limit: super::local::DEFAULT_BINARY_LIMIT,
         }
     }
 
@@ -192,7 +191,7 @@ impl ClientState {
             self.binary_limit = limit;
             return Ok(Vec::new());
         }
-        let reply = execute_command(engine, args).await?;
+        let reply = execute_command(engine, args, self.binary_limit).await?;
         if matches!(args[0].as_str(), "albumart" | "readpicture") {
             limit_binary_response(reply, self.binary_limit)
         } else {
@@ -373,7 +372,7 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
     ClientState::new().execute(engine, args).await
 }
 
-async fn execute_command(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
+async fn execute_command(engine: &Engine, args: &[String], binary_limit: usize) -> Result<Vec<u8>> {
     let command = arg(args, 0)?;
     let text = match command {
         "ping" | "password" | "noidle" => String::new(),
@@ -952,24 +951,21 @@ async fn execute_command(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
             }
         }
         "albumart" | "readpicture" => {
-            if let Some(file) = arg(args, 1)?.strip_prefix("mpd:") {
-                let offset: usize = arg(args, 2)?.parse()?;
+            let uri = arg(args, 1)?;
+            let offset: usize = arg(args, 2)?.parse()?;
+            if let Some(file) = uri.strip_prefix("mpd:") {
                 return engine
                     .catalog
                     .local
-                    .request(&format!(
-                        "{command} {} {offset}",
-                        super::local::quote(file)?
-                    ))
+                    .artwork(command, file, offset, binary_limit)
                     .await;
             }
-            let tracks = engine.catalog.resolve(arg(args, 1)?).await?;
+            let tracks = engine.catalog.resolve(uri).await?;
             let track = tracks.first().context("track not found")?;
             let uri = track.image_url.as_deref().ok_or(MissingArtwork)?;
             let data = engine.catalog.artwork(uri).await?;
-            let offset: usize = arg(args, 2)?.parse()?;
             ensure!(offset <= data.len(), "artwork offset out of range");
-            let end = (offset + 65536).min(data.len());
+            let end = (offset + binary_limit.min(super::local::MAX_ARTWORK_CHUNK)).min(data.len());
             let mut reply = format!(
                 "size: {}\ntype: image/jpeg\nbinary: {}\n",
                 data.len(),

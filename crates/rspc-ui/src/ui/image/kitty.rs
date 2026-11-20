@@ -184,7 +184,7 @@ impl Backend for Kitty {
         } else {
             let (image, aligned_area) = resize_image(image_data, area, max_size, halign, valign)?;
 
-            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), Compression::new(6));
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), Compression::fast());
             e.write_all(image.to_rgba8().as_raw())
                 .context("Error occurred when writing image bytes to zlib encoder")?;
 
@@ -285,10 +285,8 @@ fn transfer_image_data(
 ) -> Result<()> {
     let start_time = Instant::now();
     log::debug!(bytes = content.len(), img_width, img_height; "Transferring compressed image data");
-    let mut iter = content.chars().peekable();
-
-    let first: String = iter.by_ref().take(4096).collect();
-    let more = i32::from(iter.peek().is_some());
+    let (first, remaining) = content.split_at(content.len().min(4096));
+    let more = u8::from(!remaining.is_empty());
     let action = if unicode_placeholders { "T" } else { "t" };
     let placeholder = u8::from(unicode_placeholders);
     tmux_write!(
@@ -298,9 +296,10 @@ fn transfer_image_data(
         rows = area.height
     )?;
 
-    while iter.peek().is_some() {
-        let chunk: String = iter.by_ref().take(4096).collect();
-        let m = i32::from(iter.peek().is_some());
+    let mut chunks = remaining.as_bytes().chunks(4096).peekable();
+    while let Some(chunk) = chunks.next() {
+        let chunk = std::str::from_utf8(chunk)?;
+        let m = u8::from(chunks.peek().is_some());
         tmux_write!(w, "\x1b_Gm={m};{chunk}\x1b\\")?;
     }
     log::debug!(duration:? = start_time.elapsed(); "Transfer finished");
@@ -321,6 +320,12 @@ pub struct ImageData {
     img_width: u32,
     img_height: u32,
     aligned_area: Rect,
+}
+
+impl ImageData {
+    pub(super) fn encoded_len(&self) -> usize {
+        self.content.len()
+    }
 }
 
 #[derive(derive_more::Debug)]

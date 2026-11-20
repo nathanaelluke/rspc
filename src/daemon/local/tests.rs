@@ -215,23 +215,45 @@ async fn interrupted_artwork_reads_restart_the_chunk_on_a_new_connection() {
         let mut peer = BufStream::new(peer);
         let mut command = String::new();
         peer.read_line(&mut command).await.unwrap();
+        assert_eq!(command, "binarylimit 262144\n");
+        peer.write_all(b"OK\n").await.unwrap();
+        peer.flush().await.unwrap();
+        command.clear();
+        peer.read_line(&mut command).await.unwrap();
         assert_eq!(command, "readpicture \"fixture.flac\" 0\n");
         peer.write_all(b"size: 4\nbinary: 4\nab").await.unwrap();
         peer.flush().await.unwrap();
     });
     let server = scripted_peer(
         listener,
-        vec![(
-            "readpicture \"fixture.flac\" 0",
-            "size: 4\nbinary: 4\nabcd\nOK\n",
-        )],
+        vec![
+            (
+                "binarylimit 262144",
+                "ACK [5@0] {} unknown command \"binarylimit\"\n",
+            ),
+            (
+                "readpicture \"fixture.flac\" 0",
+                "size: 4\nbinary: 4\nabcd\nOK\n",
+            ),
+            (
+                "readpicture \"fixture.flac\" 2",
+                "size: 4\nbinary: 2\ncd\nOK\n",
+            ),
+        ],
     );
     assert_eq!(
         library
-            .request("readpicture \"fixture.flac\" 0")
+            .artwork("readpicture", "fixture.flac", 0, 262144)
             .await
             .unwrap(),
         b"size: 4\nbinary: 4\nabcd\n"
+    );
+    assert_eq!(
+        library
+            .artwork("readpicture", "fixture.flac", 2, 262144)
+            .await
+            .unwrap(),
+        b"size: 4\nbinary: 2\ncd\n"
     );
     partial.await.unwrap();
     server.await.unwrap();
