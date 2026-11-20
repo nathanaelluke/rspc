@@ -527,6 +527,33 @@ pub fn wav(path: &Path, seconds: f64) -> Result<()> {
 }
 
 impl Harness {
+    pub fn restart_mpd(&mut self) -> Result<()> {
+        if let Some(mut process) = self.mpd.take() {
+            // Exercise orderly service restarts as well as the hard kills in
+            // the outage tests; neither should advance the unified queue.
+            unsafe {
+                libc::kill(process.0.id() as i32, libc::SIGTERM);
+            }
+            process.0.wait()?;
+        }
+        let _ = fs::remove_file(self.path("mpd.sock"));
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.path("mpd.log"))?;
+        self.mpd = Some(Process(
+            Command::new("mpd")
+                .args(["--no-daemon", "--stdout"])
+                .arg(self.path("mpd.conf"))
+                .env_clear()
+                .envs(&self.env)
+                .stdout(Stdio::from(log.try_clone()?))
+                .stderr(Stdio::from(log))
+                .spawn()?,
+        ));
+        wait(|| Ok(self.path("mpd.sock").exists() && self.mpd("ping", "default").is_ok()))
+    }
+
     pub fn mixed() -> Result<Self> {
         let mut h = Self::isolated(false)?;
         h.env.insert(

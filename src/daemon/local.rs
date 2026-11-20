@@ -102,6 +102,28 @@ fn mixer_unavailable(error: &anyhow::Error) -> bool {
         .to_string()
         .contains("{setvol} All outputs are disabled")
 }
+fn disconnected(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.to_string() == "MPD disconnected"
+            || cause
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+            || cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::NotConnected
+                        | std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::HostUnreachable
+                        | std::io::ErrorKind::NetworkUnreachable
+                        | std::io::ErrorKind::TimedOut
+                )
+            })
+    })
+}
 impl Wire {
     async fn open(settings: &Settings) -> Result<Self> {
         let stream: Box<dyn Io> = if settings.address.starts_with('/') {
@@ -362,17 +384,52 @@ impl Library {
     }
     pub async fn request(&self, command: &str) -> Result<Vec<u8>> {
         let mut slot = self.wire.lock().await;
-        if slot.is_none() {
-            *slot =
-                Some(Wire::open(&self.settings).await.context(
+        let read_only = matches!(
+            command.split_ascii_whitespace().next(),
+            Some(
+                "listallinfo"
+                    | "lsinfo"
+                    | "listplaylists"
+                    | "listplaylistinfo"
+                    | "readpicture"
+                    | "albumart"
+                    | "decoders"
+            )
+        );
+        if !read_only && let Some(wire) = slot.as_mut() {
+            // Check the cached connection before sending a non-idempotent
+            // edit. Reconnecting here cannot duplicate an edit not yet sent.
+            if let Err(error) = wire.command("ping").await {
+                slot.take();
+                if !disconnected(&error) {
+                    return Err(error);
+                }
+            }
+        }
+        let mut retried = false;
+        loop {
+            if slot.is_none() {
+                *slot = Some(Wire::open(&self.settings).await.context(
                     "Local MPD unavailable; check RSPC_MPD_ADDRESS or your rmpc config",
                 )?);
+            }
+            let result = slot.as_mut().unwrap().command(command).await;
+            if let Err(error) = &result {
+                slot.take();
+                // Reads may be replayed after MPD expires an idle socket.
+                // Never replay a playlist edit that might already have applied.
+                if read_only && !retried && disconnected(error) {
+                    retried = true;
+                    continue;
+                }
+                if !read_only && disconnected(error) {
+                    return Err(anyhow::anyhow!(
+                        "MPD disconnected during an edit; it may have applied. Refresh before retrying: {error:#}"
+                    ));
+                }
+            }
+            return result;
         }
-        let result = slot.as_mut().unwrap().command(command).await;
-        if result.is_err() {
-            slot.take();
-        }
-        result
     }
     pub async fn invalidate(&self) {
         self.cached.lock().await.take();
@@ -497,6 +554,7 @@ struct PlayerState {
     ended: bool,
 }
 pub struct Player {
+    settings: Settings,
     state: Mutex<PlayerState>,
     generation: AtomicU64,
     closed: AtomicBool,
@@ -531,6 +589,7 @@ impl Player {
             .and_then(|b| serde_json::from_slice(&b).ok());
         let (done, _) = watch::channel(false);
         let player = Arc::new(Self {
+            settings,
             state: Mutex::new(PlayerState {
                 wire,
                 lease,
@@ -557,11 +616,34 @@ impl Player {
                 };
                 let reply = tokio::select! { _=stop.changed()=>break, reply=result=>reply };
                 let Some(player) = weak.upgrade() else { break };
-                if let Err(error) = reply {
+                if let Err(mut error) = reply {
+                    // The idle connection and command connection have separate
+                    // lifetimes. Reattach the watcher before interrupting audio.
+                    if disconnected(&error) {
+                        let reconnect = async {
+                            let mut wire = Wire::open(&player.settings).await?;
+                            wire.command(&format!("partition {}", quote(PARTITION)?))
+                                .await?;
+                            Ok::<_, anyhow::Error>(wire)
+                        };
+                        if let Ok(wire) =
+                            tokio::select! { _=stop.changed()=>break, result=reconnect=>result }
+                        {
+                            monitor = wire;
+                            match player.observe().await {
+                                Ok(()) => continue,
+                                Err(latest) => error = latest,
+                            }
+                        }
+                    }
                     player.closed.store(true, Ordering::Relaxed);
                     player.emit(
                         player.generation.load(Ordering::Relaxed),
-                        AudioEvent::Error(format!("local MPD disconnected: {error}")),
+                        if disconnected(&error) {
+                            AudioEvent::ConnectionLost(error.to_string())
+                        } else {
+                            AudioEvent::Error(error.to_string())
+                        },
                     );
                     break;
                 }
@@ -569,7 +651,11 @@ impl Player {
                     player.closed.store(true, Ordering::Relaxed);
                     player.emit(
                         player.generation.load(Ordering::Relaxed),
-                        AudioEvent::Error(error.to_string()),
+                        if disconnected(&error) {
+                            AudioEvent::ConnectionLost(error.to_string())
+                        } else {
+                            AudioEvent::Error(error.to_string())
+                        },
                     );
                     break;
                 }
@@ -586,6 +672,18 @@ impl Player {
     }
     pub fn invalid(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
+    }
+    async fn ensure_connected(&self, p: &mut PlayerState) -> Result<()> {
+        match p.wire.command("ping").await {
+            Err(error) if disconnected(&error) => {
+                p.wire = Wire::open(&self.settings).await?;
+                p.wire
+                    .command(&format!("partition {}", quote(PARTITION)?))
+                    .await?;
+                Ok(())
+            }
+            result => result.map(|_| ()),
+        }
     }
     async fn claim(&self, p: &mut PlayerState) -> Result<()> {
         if let Some(lease) = &p.lease {
@@ -662,8 +760,33 @@ impl Player {
         Ok(())
     }
     pub async fn load(&self, uri: &str, request: u64, volume: u8, position_ms: u64) -> Result<()> {
-        let file = uri.strip_prefix("mpd:").context("expected an MPD URI")?;
         let mut p = self.state.lock().await;
+        let result = match self
+            .load_inner(&mut p, uri, request, volume, position_ms)
+            .await
+        {
+            Err(error) if disconnected(&error) => {
+                // The owned partition is rebuilt from scratch, so replaying
+                // this whole transaction cannot append a duplicate queue item.
+                self.load_inner(&mut p, uri, request, volume, position_ms)
+                    .await
+            }
+            result => result,
+        };
+        drop(p);
+        result?;
+        self.observe().await
+    }
+    async fn load_inner(
+        &self,
+        p: &mut PlayerState,
+        uri: &str,
+        request: u64,
+        volume: u8,
+        position_ms: u64,
+    ) -> Result<()> {
+        let file = uri.strip_prefix("mpd:").context("expected an MPD URI")?;
+        self.ensure_connected(p).await?;
         // Some hardware mixers do not send idle mixer events for changes
         // made through the desktop. Read their live volume before stop closes
         // the mixer, rather than reapplying the engine's last observed value.
@@ -679,7 +802,7 @@ impl Player {
         p.current = Some(format!("mpd:{file}"));
         p.observed = false;
         p.ended = false;
-        self.claim(&mut p).await?;
+        self.claim(p).await?;
         for command in [
             "stop".to_string(),
             "clear".into(),
@@ -714,8 +837,7 @@ impl Player {
         if let Some(volume) = deferred_volume {
             p.wire.volume(volume, true).await?;
         }
-        drop(p);
-        self.observe().await
+        Ok(())
     }
     async fn observe(&self) -> Result<()> {
         let mut p = self.state.lock().await;
@@ -723,6 +845,7 @@ impl Player {
         if request == 0 || p.current.is_none() {
             return Ok(());
         }
+        self.ensure_connected(&mut p).await?;
         let status = fields(&p.wire.command("status").await?);
         if let Some(error) = status.get("error").filter(|e| !e.is_empty()) {
             self.emit(request, AudioEvent::Error(error.clone()));
@@ -763,37 +886,69 @@ impl Player {
         Ok(())
     }
     pub async fn pause(&self, paused: bool) -> Result<()> {
-        self.state
-            .lock()
-            .await
-            .wire
-            .command(if paused { "pause 1" } else { "pause 0" })
+        let mut p = self.state.lock().await;
+        self.control(&mut p, if paused { "pause 1" } else { "pause 0" })
             .await?;
+        drop(p);
         self.observe().await
     }
     pub async fn seek(&self, position: u64) -> Result<()> {
-        self.state
-            .lock()
-            .await
-            .wire
-            .command(&format!("seekcur {:.3}", position as f64 / 1000.0))
+        let mut p = self.state.lock().await;
+        self.control(&mut p, &format!("seekcur {:.3}", position as f64 / 1000.0))
             .await?;
+        drop(p);
         self.observe().await
     }
     pub async fn volume(&self, volume: u8) -> Result<()> {
-        self.state.lock().await.wire.volume(volume, false).await?;
+        let mut p = self.state.lock().await;
+        self.control(&mut p, &format!("setvol {volume}")).await?;
         Ok(())
+    }
+    async fn control(&self, p: &mut PlayerState, command: &str) -> Result<()> {
+        self.ensure_connected(p).await?;
+        match p.wire.command(command).await {
+            Err(error) if disconnected(&error) => {
+                self.ensure_connected(p).await?;
+                p.wire.command(command).await?;
+                Ok(())
+            }
+            result => result.map(|_| ()),
+        }
     }
     pub async fn stop(&self) -> Result<()> {
         let mut p = self.state.lock().await;
         self.generation.store(0, Ordering::Relaxed);
-        p.current = None;
+        let needs_stop = p.current.take().is_some() || p.lease.is_some();
         p.observed = false;
         p.ended = true;
-        p.wire
-            .command(&format!("partition {}", quote(PARTITION)?))
-            .await?;
-        p.wire.command("stop").await?;
+        // A previously released local player must not make Spotify playback
+        // depend on an idle MPD connection that is no longer needed.
+        if !needs_stop {
+            return Ok(());
+        }
+        match self.stop_inner(&mut p).await {
+            Err(error) if disconnected(&error) => {
+                p.wire = Wire::open(&self.settings)
+                    .await
+                    .context("Reconnect MPD to stop local playback")?;
+                // Cleanup is idempotent: check output ownership again in case
+                // the first attempt moved it before the connection was lost.
+                self.stop_inner(&mut p).await
+            }
+            result => result,
+        }
+    }
+    async fn stop_inner(&self, p: &mut PlayerState) -> Result<()> {
+        let partitions = p.wire.command("listpartitions").await?;
+        let exists = String::from_utf8_lossy(&partitions)
+            .lines()
+            .any(|line| line == format!("partition: {PARTITION}"));
+        if exists {
+            p.wire
+                .command(&format!("partition {}", quote(PARTITION)?))
+                .await?;
+            p.wire.command("stop").await?;
+        }
         if let Some(lease) = p.lease.clone() {
             p.wire
                 .command(&format!("partition {}", quote(&lease.origin)?))
@@ -817,15 +972,20 @@ impl Player {
             {
                 p.wire.command(&format!("disableoutput {id}")).await?;
             }
-            if let Some(volume) = lease.volume {
-                p.wire.command(&format!("setvol {volume}")).await?;
+            if let Some(volume) = lease.volume
+                && let Err(error) = p.wire.command(&format!("setvol {volume}")).await
+                && !mixer_unavailable(&error)
+            {
+                return Err(error);
             }
             p.lease = None;
             let _ = tokio::fs::remove_file(&self.lease_path).await;
         }
-        p.wire
-            .command(&format!("partition {}", quote(PARTITION)?))
-            .await?;
+        if exists {
+            p.wire
+                .command(&format!("partition {}", quote(PARTITION)?))
+                .await?;
+        }
         Ok(())
     }
     pub async fn shutdown(&self) {

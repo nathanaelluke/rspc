@@ -731,7 +731,10 @@ impl Engine {
         }
         let _control = if matches!(
             event,
-            AudioEvent::Ended { .. } | AudioEvent::Error(_) | AudioEvent::Inactive
+            AudioEvent::Ended { .. }
+                | AudioEvent::Error(_)
+                | AudioEvent::ConnectionLost(_)
+                | AudioEvent::Inactive
         ) || backend == Backend::Spotify
             && matches!(event, AudioEvent::ExternalState { playing: true, .. })
         {
@@ -888,6 +891,65 @@ impl Engine {
                     self.fail_inner(format!("{error:#}")).await;
                     return Err(error);
                 }
+            }
+            AudioEvent::ConnectionLost(mut error) if backend == Backend::Mpd => {
+                let state = p.playback();
+                let Some(entry) = state.entry else {
+                    return Ok(());
+                };
+                // A restart must not look like the end of a song or discard
+                // its position. Paused tracks stay paused until resumed.
+                p.position_ms = state.position_ms;
+                p.last_tick = Instant::now();
+                p.playing = false;
+                p.stopped = false;
+                p.backend = None;
+                p.request = None;
+                p.loading = None;
+                drop(p);
+                if state.playing {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    for attempt in 0..4 {
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        if attempt > 0 {
+                            tokio::time::sleep(Duration::from_millis(250 << (attempt - 1))).await;
+                        }
+                        match self
+                            .play_inner_at(PlayTarget::Id(entry.id), state.position_ms)
+                            .await
+                        {
+                            Ok(()) => return Ok(()),
+                            Err(latest) => error = format!("{latest:#}"),
+                        }
+                    }
+                } else {
+                    // Retain the paused selection in the engine, but release
+                    // dead MPD resources so switching to Spotify stays usable.
+                    let local = self.local_audio.write().await.take();
+                    if let Some(local) = local {
+                        local.shutdown().await;
+                    }
+                }
+                let mut p = self.player.lock().await;
+                p.queue.current = Some(entry.id);
+                p.position_ms = state.position_ms;
+                p.last_tick = Instant::now();
+                p.playing = false;
+                p.stopped = false;
+                p.backend = None;
+                p.request = None;
+                p.loading = None;
+                p.error = if state.playing {
+                    format!(
+                        "Local MPD could not reconnect; playback is paused at its last position. Resume to retry. {error}"
+                    )
+                } else {
+                    String::new()
+                };
+                drop(p);
+                self.changed(vec!["player"]);
             }
             AudioEvent::Error(error) => {
                 drop(p);

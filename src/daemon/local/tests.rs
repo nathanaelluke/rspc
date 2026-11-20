@@ -1,5 +1,344 @@
 use super::*;
 
+fn expired_player(settings: Settings, lease_path: PathBuf, active: bool) -> Player {
+    let (client, server) = UnixStream::pair().unwrap();
+    drop(server);
+    Player {
+        settings,
+        state: Mutex::new(PlayerState {
+            wire: Wire {
+                stream: BufStream::new(Box::new(client)),
+            },
+            lease: active.then(|| Lease {
+                name: "fixture".into(),
+                origin: "default".into(),
+                enabled: true,
+                volume: None,
+            }),
+            current: active.then(|| "mpd:fixture.flac".into()),
+            observed: active,
+            ended: !active,
+        }),
+        generation: AtomicU64::new(1),
+        closed: AtomicBool::new(false),
+        tx: mpsc::unbounded_channel().0,
+        done: watch::channel(false).0,
+        lease_path,
+    }
+}
+
+fn scripted_peer(
+    listener: tokio::net::UnixListener,
+    commands: Vec<(&'static str, &'static str)>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufStream::new(stream);
+        stream.write_all(b"OK MPD 0.24.0\n").await.unwrap();
+        stream.flush().await.unwrap();
+        for (expected, response) in commands {
+            let mut command = String::new();
+            stream.read_line(&mut command).await.unwrap();
+            assert_eq!(command.trim_end(), expected);
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.flush().await.unwrap();
+        }
+    })
+}
+
+#[tokio::test]
+async fn released_local_player_does_not_block_spotify_when_mpd_is_gone() {
+    let directory = tempfile::tempdir().unwrap();
+    let player = expired_player(
+        Settings {
+            address: directory
+                .path()
+                .join("missing.sock")
+                .to_string_lossy()
+                .into_owned(),
+            password: None,
+        },
+        directory.path().join("lease.json"),
+        false,
+    );
+    player.stop().await.unwrap();
+    player.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn handoff_reconnects_and_restores_output_after_an_idle_disconnect() {
+    let directory = tempfile::tempdir().unwrap();
+    let address = directory.path().join("mpd.sock");
+    let listener = tokio::net::UnixListener::bind(&address).unwrap();
+    let server = scripted_peer(
+        listener,
+        vec![
+            (
+                "listpartitions",
+                "partition: default\npartition: rspc\nOK\n",
+            ),
+            ("partition \"rspc\"", "OK\n"),
+            ("stop", "OK\n"),
+            ("partition \"default\"", "OK\n"),
+            (
+                "outputs",
+                "outputid: 0\noutputname: fixture\nplugin: pulse\noutputenabled: 1\nOK\n",
+            ),
+            (
+                "outputs",
+                "outputid: 0\noutputname: fixture\nplugin: pulse\noutputenabled: 1\nOK\n",
+            ),
+            ("partition \"rspc\"", "OK\n"),
+        ],
+    );
+    let player = expired_player(
+        Settings {
+            address: address.to_string_lossy().into_owned(),
+            password: None,
+        },
+        directory.path().join("lease.json"),
+        true,
+    );
+    tokio::time::timeout(Duration::from_secs(3), player.stop())
+        .await
+        .unwrap()
+        .unwrap();
+    server.await.unwrap();
+    let state = player.state.lock().await;
+    assert!(state.current.is_none() && state.lease.is_none());
+}
+
+#[tokio::test]
+async fn controls_reconnect_in_the_owned_partition_before_mutating_playback() {
+    let directory = tempfile::tempdir().unwrap();
+    let address = directory.path().join("mpd.sock");
+    let listener = tokio::net::UnixListener::bind(&address).unwrap();
+    let server = scripted_peer(
+        listener,
+        vec![
+            ("partition \"rspc\"", "OK\n"),
+            ("pause 1", "OK\n"),
+            ("ping", "OK\n"),
+            ("status", "state: pause\nvolume: 40\nelapsed: 2.000\nOK\n"),
+            ("currentsong", "file: fixture.flac\nOK\n"),
+        ],
+    );
+    let player = expired_player(
+        Settings {
+            address: address.to_string_lossy().into_owned(),
+            password: None,
+        },
+        directory.path().join("lease.json"),
+        true,
+    );
+    tokio::time::timeout(Duration::from_secs(3), player.pause(true))
+        .await
+        .unwrap()
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn library_reads_reconnect_but_uncertain_writes_are_never_replayed() {
+    let directory = tempfile::tempdir().unwrap();
+    let address = directory.path().join("mpd.sock");
+    let listener = tokio::net::UnixListener::bind(&address).unwrap();
+    let library = Library::with_settings(Settings {
+        address: address.to_string_lossy().into_owned(),
+        password: None,
+    });
+    let (client, server) = UnixStream::pair().unwrap();
+    drop(server);
+    *library.wire.lock().await = Some(Wire {
+        stream: BufStream::new(Box::new(client)),
+    });
+    let server = scripted_peer(listener, vec![("lsinfo \"\"", "file: fixture.flac\nOK\n")]);
+    assert_eq!(
+        library.request("lsinfo \"\"").await.unwrap(),
+        b"file: fixture.flac\n"
+    );
+    server.await.unwrap();
+    std::fs::remove_file(&address).unwrap();
+    let listener = tokio::net::UnixListener::bind(&address).unwrap();
+    let (client, server) = UnixStream::pair().unwrap();
+    let applied = tokio::spawn(async move {
+        let mut server = BufStream::new(server);
+        let mut command = String::new();
+        server.read_line(&mut command).await.unwrap();
+        assert_eq!(command, "ping\n");
+        server.write_all(b"OK\n").await.unwrap();
+        server.flush().await.unwrap();
+        command.clear();
+        server.read_line(&mut command).await.unwrap();
+        assert_eq!(command, "playlistadd \"mix\" \"fixture.flac\"\n");
+        // The edit applied, but the acknowledgement was lost.
+    });
+    *library.wire.lock().await = Some(Wire {
+        stream: BufStream::new(Box::new(client)),
+    });
+    assert!(
+        library
+            .request("playlistadd \"mix\" \"fixture.flac\"")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("may have applied")
+    );
+    applied.await.unwrap();
+    assert!(library.wire.lock().await.is_none());
+    // A write must fail without attempting to open a replacement connection.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), listener.accept())
+            .await
+            .is_err()
+    );
+    let (client, server) = UnixStream::pair().unwrap();
+    drop(server);
+    *library.wire.lock().await = Some(Wire {
+        stream: BufStream::new(Box::new(client)),
+    });
+    let server = scripted_peer(
+        listener,
+        vec![("playlistadd \"mix\" \"fixture.flac\"", "OK\n")],
+    );
+    library
+        .request("playlistadd \"mix\" \"fixture.flac\"")
+        .await
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_artwork_reads_restart_the_chunk_on_a_new_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let address = directory.path().join("mpd.sock");
+    let listener = tokio::net::UnixListener::bind(&address).unwrap();
+    let library = Library::with_settings(Settings {
+        address: address.to_string_lossy().into_owned(),
+        password: None,
+    });
+    let (client, peer) = UnixStream::pair().unwrap();
+    *library.wire.lock().await = Some(Wire {
+        stream: BufStream::new(Box::new(client)),
+    });
+    let partial = tokio::spawn(async move {
+        let mut peer = BufStream::new(peer);
+        let mut command = String::new();
+        peer.read_line(&mut command).await.unwrap();
+        assert_eq!(command, "readpicture \"fixture.flac\" 0\n");
+        peer.write_all(b"size: 4\nbinary: 4\nab").await.unwrap();
+        peer.flush().await.unwrap();
+    });
+    let server = scripted_peer(
+        listener,
+        vec![(
+            "readpicture \"fixture.flac\" 0",
+            "size: 4\nbinary: 4\nabcd\nOK\n",
+        )],
+    );
+    assert_eq!(
+        library
+            .request("readpicture \"fixture.flac\" 0")
+            .await
+            .unwrap(),
+        b"size: 4\nbinary: 4\nabcd\n"
+    );
+    partial.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnecting_a_load_is_atomic_with_respect_to_the_idle_observer() {
+    let directory = tempfile::tempdir().unwrap();
+    let address = directory.path().join("mpd.sock");
+    let listener = tokio::net::UnixListener::bind(&address).unwrap();
+    let player = Arc::new(expired_player(
+        Settings {
+            address: address.to_string_lossy().into_owned(),
+            password: None,
+        },
+        directory.path().join("lease.json"),
+        true,
+    ));
+    let (client, peer) = UnixStream::pair().unwrap();
+    player.state.lock().await.wire = Wire {
+        stream: BufStream::new(Box::new(client)),
+    };
+    let (failed, failure) = tokio::sync::oneshot::channel();
+    let first = tokio::spawn(async move {
+        let mut peer = BufStream::new(peer);
+        for (expected, response) in [
+            ("ping", "OK\n"),
+            ("status", "volume: 40\nOK\n"),
+            ("partition \"rspc\"", "OK\n"),
+            (
+                "outputs",
+                "outputid: 0\noutputname: fixture\nplugin: pulse\nOK\n",
+            ),
+            ("enableoutput 0", "OK\n"),
+        ] {
+            let mut command = String::new();
+            peer.read_line(&mut command).await.unwrap();
+            assert_eq!(command.trim_end(), expected);
+            peer.write_all(response.as_bytes()).await.unwrap();
+            peer.flush().await.unwrap();
+        }
+        let mut command = String::new();
+        peer.read_line(&mut command).await.unwrap();
+        assert_eq!(command, "stop\n");
+        failed.send(()).unwrap();
+        tokio::task::yield_now().await;
+        // Drop the connection before clearing the previous song. An observer
+        // must not see this half-loaded state under the new request ID.
+    });
+    let mut commands = vec![
+        ("partition \"rspc\"", "OK\n"),
+        ("status", "volume: 40\nOK\n"),
+        ("partition \"rspc\"", "OK\n"),
+        (
+            "outputs",
+            "outputid: 0\noutputname: fixture\nplugin: pulse\nOK\n",
+        ),
+        ("enableoutput 0", "OK\n"),
+    ];
+    for command in [
+        "stop",
+        "clear",
+        "repeat 0",
+        "random 0",
+        "single 1",
+        "consume 0",
+        "addid \"next.flac\"",
+        "setvol 40",
+        "play 0",
+    ] {
+        commands.push((command, "OK\n"));
+    }
+    for _ in 0..2 {
+        commands.extend([
+            ("ping", "OK\n"),
+            ("status", "volume: 40\nstate: play\nelapsed: 1.000\nOK\n"),
+            ("currentsong", "file: next.flac\nOK\n"),
+        ]);
+    }
+    let second = scripted_peer(listener, commands);
+    let observer = Arc::clone(&player);
+    let observe = tokio::spawn(async move {
+        failure.await.unwrap();
+        observer.observe().await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        player.load("mpd:next.flac", 2, 40, 0),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    observe.await.unwrap().unwrap();
+    first.await.unwrap();
+    second.await.unwrap();
+}
+
 #[tokio::test]
 async fn startup_volume_waits_for_the_output_mixer() {
     let (client, mut server) = UnixStream::pair().unwrap();
@@ -82,7 +421,7 @@ async fn check_load_volume(
 ) {
     let (client, server) = UnixStream::pair().unwrap();
     let observed_volume = volume_before_play.unwrap_or(73);
-    let mut commands = Vec::<(String, String)>::new();
+    let mut commands = vec![("ping".to_owned(), "OK\n".to_owned())];
     if let Some(status) = previous_status {
         commands.push(("status".into(), format!("{status}OK\n")));
     }
@@ -131,6 +470,7 @@ async fn check_load_volume(
         ));
     }
     commands.extend([
+        ("ping".into(), "OK\n".into()),
         (
             "status".into(),
             format!("volume: {observed_volume}\nstate: play\nelapsed: 1.000\nOK\n"),
@@ -154,6 +494,7 @@ async fn check_load_volume(
     let (done, _) = watch::channel(false);
     let directory = tempfile::tempdir().unwrap();
     let player = Player {
+        settings: Settings::default(),
         state: Mutex::new(PlayerState {
             wire: Wire {
                 stream: BufStream::new(Box::new(client)),

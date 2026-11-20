@@ -48,6 +48,7 @@ pub enum AudioEvent {
         request: u64,
     },
     Error(String),
+    ConnectionLost(String),
     ExternalState {
         track: TrackInfo,
         position: u64,

@@ -8,6 +8,116 @@ use std::{
 use support::{Harness, Protocol, quote, state_is, wait};
 
 #[test]
+fn expired_mpd_connections_recover_on_the_first_browse_control_and_handoff() -> Result<()> {
+    let mut h = Harness::mixed()?;
+    h.stop()?;
+    let config = fs::read_to_string(h.path("mpd.conf"))?;
+    fs::write(
+        h.path("mpd.conf"),
+        format!("{config}\nconnection_timeout \"1\"\n"),
+    )?;
+    h.restart_mpd()?;
+    h.start()?;
+    h.raw("lsinfo \"Local Files\"")?;
+    thread::sleep(Duration::from_millis(2200));
+    assert!(h.raw("lsinfo \"Local Files\"")?.contains("mpd:long.wav"));
+    h.raw("playid 4")?;
+    h.raw("pause 1")?;
+    thread::sleep(Duration::from_millis(2200));
+    h.raw("seekcur 2")?;
+    h.raw("playlistadd \"Local Playlists/Recovery\" \"mpd:long.wav\"")?;
+    assert_eq!(
+        h.raw("listplaylistinfo \"Local Playlists/Recovery\"")?
+            .matches("file: ")
+            .count(),
+        1
+    );
+    h.raw("setvol 37")?;
+    h.raw("pause 0")?;
+    assert!(state_is(&h.status()?, "play"));
+    thread::sleep(Duration::from_millis(2200));
+    h.raw("playid 1")?;
+    wait(|| Ok(h.spotify()["uri"] == "spotify:track:first"))?;
+    h.raw("stop")?;
+    if let Some(mut mpd) = h.mpd.take() {
+        mpd.0.kill()?;
+        mpd.0.wait()?;
+    }
+    h.raw("playid 3")?;
+    wait(|| Ok(h.spotify()["uri"] == "spotify:track:last"))?;
+    assert!(h.status()?["error"].is_null());
+    Ok(())
+}
+
+#[test]
+fn restarting_mpd_recovers_the_same_local_song_without_skipping_the_queue() -> Result<()> {
+    let mut h = Harness::mixed()?;
+    h.raw("playid 4")?;
+    h.raw("seekcur 2")?;
+    let queue = h.queue()?;
+    h.restart_mpd()?;
+    wait(|| {
+        let state = h.status()?;
+        Ok(state["songid"] == 4
+            && state_is(&state, "play")
+            && state["elapsed"].as_f64().unwrap_or(0.0) >= 2.0
+            && h.mpd("status", "rspc")
+                .is_ok_and(|status| status.contains("state: play")))
+    })?;
+    assert_eq!(h.queue()?, queue);
+    assert!(h.status()?["error"].is_null());
+    Ok(())
+}
+
+#[test]
+fn restarting_mpd_keeps_paused_local_playback_paused_and_resumable() -> Result<()> {
+    let mut h = Harness::mixed()?;
+    h.raw("playid 4")?;
+    h.raw("seekcur 2")?;
+    h.raw("pause 1")?;
+    h.restart_mpd()?;
+    wait(|| Ok(h.doctor()?.contains("active_source: none")))?;
+    let state = h.status()?;
+    assert!(state_is(&state, "pause"));
+    assert_eq!(state["songid"], 4);
+    assert!(state["elapsed"].as_f64().unwrap_or(0.0) >= 2.0);
+    h.raw("pause 0")?;
+    wait(|| Ok(state_is(&h.status()?, "play")))?;
+    assert_eq!(h.queue()?.as_array().unwrap().len(), 4);
+    Ok(())
+}
+
+#[test]
+fn an_mpd_outage_preserves_position_and_does_not_disable_spotify() -> Result<()> {
+    let mut h = Harness::mixed()?;
+    h.raw("playid 4")?;
+    h.raw("seekcur 2")?;
+    let queue = h.queue()?;
+    if let Some(mut mpd) = h.mpd.take() {
+        mpd.0.kill()?;
+        mpd.0.wait()?;
+    }
+    wait(|| {
+        let state = h.status()?;
+        Ok(state_is(&state, "pause")
+            && state["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("Resume to retry")))
+    })?;
+    let state = h.status()?;
+    assert_eq!(state["songid"], 4);
+    assert!(state["elapsed"].as_f64().unwrap_or(0.0) >= 2.0);
+    assert_eq!(h.queue()?, queue);
+    h.raw("playid 1")?;
+    wait(|| Ok(h.spotify()["uri"] == "spotify:track:first"))?;
+    h.restart_mpd()?;
+    h.raw("playid 4")?;
+    wait(|| Ok(state_is(&h.status()?, "play")))?;
+    assert_eq!(h.status()?["songid"], 4);
+    Ok(())
+}
+
+#[test]
 fn spotify_startup_recovers_from_a_stale_port_file() -> Result<()> {
     let mut h = Harness::mixed()?;
     h.stop()?;
