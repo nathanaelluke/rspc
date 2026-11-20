@@ -1,6 +1,100 @@
 use super::*;
 
 #[test]
+fn merged_results_prefer_playable_local_copies_without_hiding_other_recordings() {
+    let spotify = TrackInfo {
+        uri: Some("spotify:track:fixture".into()),
+        name: "Song of the Sisters".into(),
+        album: "The Dune Sketchbook".into(),
+        artists: vec!["Hans Zimmer".into()],
+        duration_ms: 100_000,
+        track_number: 1,
+        ..TrackInfo::default()
+    };
+    let local = TrackInfo {
+        uri: Some("mpd:Sketchbook/01.flac".into()),
+        name: " Song  of the Sisters ".into(),
+        artists: vec!["HANS ZIMMER".into()],
+        duration_ms: 100_500,
+        is_local: true,
+        ..spotify.clone()
+    };
+    let merged = prefer_local_tracks(vec![spotify.clone(), spotify.clone()], vec![local.clone()]);
+    assert_eq!(merged, vec![local.clone()]);
+    for different in [
+        TrackInfo {
+            album: "Other release".into(),
+            ..local.clone()
+        },
+        TrackInfo {
+            artists: vec!["Other artist".into()],
+            ..local.clone()
+        },
+        TrackInfo {
+            duration_ms: 110_000,
+            ..local.clone()
+        },
+        TrackInfo {
+            track_number: 2,
+            ..local.clone()
+        },
+        TrackInfo {
+            is_playable: false,
+            ..local.clone()
+        },
+        TrackInfo {
+            duration_ms: 0,
+            ..local.clone()
+        },
+        TrackInfo {
+            name: "Song of the Sisters (live)".into(),
+            ..local.clone()
+        },
+        TrackInfo {
+            artists: vec![" ".into()],
+            ..local.clone()
+        },
+        TrackInfo {
+            album: String::new(),
+            ..local.clone()
+        },
+        TrackInfo {
+            uri: Some("mpd:https://example.test/stream".into()),
+            is_local: false,
+            ..local.clone()
+        },
+    ] {
+        assert_eq!(
+            prefer_local_tracks(vec![spotify.clone()], vec![different.clone()]),
+            vec![spotify.clone(), different]
+        );
+    }
+    let spotify_only = TrackInfo {
+        name: "Spotify only".into(),
+        ..spotify.clone()
+    };
+    let local_only = TrackInfo {
+        name: "Local only".into(),
+        ..local.clone()
+    };
+    assert_eq!(
+        prefer_local_tracks(
+            vec![spotify_only.clone(), spotify.clone()],
+            vec![local.clone(), local_only.clone()]
+        ),
+        vec![spotify_only, local.clone(), local_only],
+    );
+    assert_eq!(
+        prefer_local_tracks(vec![spotify.clone(), spotify.clone()], vec![]),
+        vec![spotify.clone(), spotify]
+    );
+    assert_eq!(
+        prefer_local_tracks(vec![], vec![local.clone(), local.clone()]),
+        vec![local.clone(), local]
+    );
+}
+
+#[test]
 fn playlist_and_library_rows_keep_addition_dates_separate_from_release_dates() {
     for key in ["item", "track"] {
         let mut row = json!({"added_at":"2026-11-01T10:00:00-05:00"});

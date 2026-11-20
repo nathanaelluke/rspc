@@ -33,10 +33,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            address: crate::paths::xdg("XDG_DATA_HOME", ".local/share")
-                .join("mpd/socket")
-                .to_string_lossy()
-                .into_owned(),
+            address: "127.0.0.1:6600".into(),
             password: None,
         }
     }
@@ -56,7 +53,7 @@ impl Settings {
             });
         let mut value = match std::fs::read_to_string(file) {
             Ok(text) => ron::from_str(&text).unwrap_or_else(|_| {
-                log::warn!("could not read MPD settings from rmpc config; using the default socket or RSPC_MPD_ADDRESS");
+                log::warn!("could not read MPD settings from rmpc config; using 127.0.0.1:6600 or RSPC_MPD_ADDRESS");
                 Self::default()
             }),
             Err(_) => Self::default(),
@@ -99,6 +96,11 @@ trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 struct Wire {
     stream: BufStream<Box<dyn Io>>,
+}
+fn mixer_unavailable(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains("{setvol} All outputs are disabled")
 }
 impl Wire {
     async fn open(settings: &Settings) -> Result<Self> {
@@ -147,6 +149,22 @@ impl Wire {
         })
         .await
         .context("MPD request timed out")?
+    }
+    async fn volume(&mut self, volume: u8, starting: bool) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.command(&format!("setvol {volume}")).await {
+                Ok(_) => return Ok(()),
+                // Hardware mixers (including PulseAudio) may not exist until
+                // the output opens asynchronously after play/seek.
+                Err(error)
+                    if starting && mixer_unavailable(&error) && Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
     async fn response(&mut self) -> Result<Vec<u8>> {
         let mut out = Vec::new();
@@ -646,6 +664,17 @@ impl Player {
     pub async fn load(&self, uri: &str, request: u64, volume: u8, position_ms: u64) -> Result<()> {
         let file = uri.strip_prefix("mpd:").context("expected an MPD URI")?;
         let mut p = self.state.lock().await;
+        // Some hardware mixers do not send idle mixer events for changes
+        // made through the desktop. Read their live volume before stop closes
+        // the mixer, rather than reapplying the engine's last observed value.
+        let volume = if p.current.is_some() {
+            fields(&p.wire.command("status").await?)
+                .get("volume")
+                .and_then(|value| value.parse::<u8>().ok())
+                .map(|value| value.min(100))
+        } else {
+            Some(volume)
+        };
         self.generation.store(request, Ordering::Relaxed);
         p.current = Some(format!("mpd:{file}"));
         p.observed = false;
@@ -659,16 +688,31 @@ impl Player {
             "single 1".into(),
             "consume 0".into(),
             format!("addid {}", quote(file)?),
-            format!("setvol {volume}"),
-            // Start at the requested offset in one command. Starting at zero
-            // then seeking can race decoder startup for short files on MPD.
-            if position_ms == 0 {
-                "play 0".into()
-            } else {
-                format!("seek 0 {:.3}", position_ms as f64 / 1000.0)
-            },
         ] {
             p.wire.command(&command).await?;
+        }
+        // At natural track end a hardware mixer may already be closed. Leave
+        // its volume alone when status has no value; the engine's cached value
+        // can predate a desktop volume change.
+        let deferred_volume = if let Some(volume) = volume {
+            match p.wire.volume(volume, false).await {
+                Ok(()) => None,
+                Err(error) if mixer_unavailable(&error) => Some(volume),
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        // Start at the requested offset in one command. Starting at zero
+        // then seeking can race decoder startup for short files on MPD.
+        let start = if position_ms == 0 {
+            "play 0".into()
+        } else {
+            format!("seek 0 {:.3}", position_ms as f64 / 1000.0)
+        };
+        p.wire.command(&start).await?;
+        if let Some(volume) = deferred_volume {
+            p.wire.volume(volume, true).await?;
         }
         drop(p);
         self.observe().await
@@ -737,12 +781,7 @@ impl Player {
         self.observe().await
     }
     pub async fn volume(&self, volume: u8) -> Result<()> {
-        self.state
-            .lock()
-            .await
-            .wire
-            .command(&format!("setvol {volume}"))
-            .await?;
+        self.state.lock().await.wire.volume(volume, false).await?;
         Ok(())
     }
     pub async fn stop(&self) -> Result<()> {

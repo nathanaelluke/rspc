@@ -146,10 +146,12 @@ impl Catalog {
                     if self.demo {
                         tracks.extend(self.liked().await?);
                     } else {
-                        tracks.extend(self.album_tracks_many(&self.saved_albums().await?).await?);
-                        if let Ok(local) = self.local.all().await {
-                            tracks.extend(local.iter().cloned());
-                        }
+                        let spotify = self.album_tracks_many(&self.saved_albums().await?).await?;
+                        let local = self.local.all().await.ok();
+                        tracks.extend(prefer_local_tracks(
+                            spotify,
+                            local.map_or_else(Vec::new, |tracks| tracks.as_ref().clone()),
+                        ));
                     }
                 }
                 "Artists" => pending.extend(

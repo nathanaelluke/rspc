@@ -809,12 +809,12 @@ impl Catalog {
                 }
             }
         }
-        let mut tracks = match spotify {
+        let tracks = match spotify {
             Ok(t) => t,
             Err(e) if !local_available => return Err(e),
             Err(_) => Vec::new(),
         };
-        tracks.extend(local_matches);
+        let tracks = prefer_local_tracks(tracks, local_matches);
         Ok(self.remember(tracks).await)
     }
     async fn spotify_find(self: &Arc<Self>, query: &str, search: bool) -> Result<Vec<TrackInfo>> {
@@ -988,6 +988,87 @@ impl Catalog {
 }
 pub fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+// Only collapse copies across sources. Keep different releases, recordings,
+// and multiple local files intact; metadata alone is not a global track ID.
+fn prefer_local_tracks(spotify: Vec<TrackInfo>, local: Vec<TrackInfo>) -> Vec<TrackInfo> {
+    if local.is_empty() {
+        return spotify;
+    }
+    if spotify.is_empty() {
+        return local;
+    }
+    fn normalized(value: &str) -> String {
+        value
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+    fn key(track: &TrackInfo) -> (String, String, Vec<String>) {
+        let mut artists: Vec<_> = track
+            .artists
+            .iter()
+            .filter(|artist| !artist.trim().is_empty())
+            .map(|a| normalized(a))
+            .collect();
+        artists.sort();
+        artists.dedup();
+        (normalized(&track.name), normalized(&track.album), artists)
+    }
+    let mut candidates = HashMap::<_, Vec<usize>>::new();
+    for (index, track) in local.iter().enumerate() {
+        if track.is_local
+            && track.is_playable
+            && track.uri.as_deref().is_some_and(|u| u.starts_with("mpd:"))
+            && !track.name.trim().is_empty()
+            && !track.album.trim().is_empty()
+            && track.artists.iter().any(|artist| !artist.trim().is_empty())
+        {
+            candidates.entry(key(track)).or_default().push(index);
+        }
+    }
+    if candidates.is_empty() {
+        let mut merged = spotify;
+        merged.extend(local);
+        return merged;
+    }
+    let mut used = vec![false; local.len()];
+    let mut merged = Vec::with_capacity(spotify.len() + local.len());
+    for track in spotify {
+        let replacement = track
+            .uri
+            .as_deref()
+            .filter(|u| u.starts_with("spotify:track:"))
+            .and_then(|_| candidates.get(&key(&track)))
+            .and_then(|indices| {
+                indices.iter().copied().find(|&index| {
+                    let other = &local[index];
+                    track.duration_ms > 0
+                        && other.duration_ms > 0
+                        && track.duration_ms.abs_diff(other.duration_ms) <= 2000
+                        && (track.track_number == 0
+                            || other.track_number == 0
+                            || track.track_number == other.track_number)
+                })
+            });
+        if let Some(index) = replacement {
+            if !used[index] {
+                merged.push(local[index].clone());
+                used[index] = true;
+            }
+        } else {
+            merged.push(track);
+        }
+    }
+    merged.extend(
+        local
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, track)| (!used[index]).then_some(track)),
+    );
+    merged
 }
 fn addition_date(item: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
     item["added_at"]
