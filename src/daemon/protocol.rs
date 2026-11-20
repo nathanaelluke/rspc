@@ -496,8 +496,10 @@ async fn execute_command(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
             );
             if let Some(i) = p.queue.cursor() {
                 s.push_str(&format!("song: {i}\nsongid: {}\n", p.queue.entries[i].id));
-                if let Some(next) = p.queue.entries.get(i + 1) {
-                    s.push_str(&format!("nextsong: {}\nnextsongid: {}\n", i + 1, next.id));
+                if let Some(index) = p.next_song_position(i)
+                    && let Some(next) = p.queue.entries.get(index)
+                {
+                    s.push_str(&format!("nextsong: {index}\nnextsongid: {}\n", next.id));
                 }
             }
             if !state.error.is_empty() {

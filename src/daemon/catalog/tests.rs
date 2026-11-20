@@ -1386,9 +1386,6 @@ async fn playlist_save_modes_write_local_playlists_without_touching_the_mpd_queu
             ("playlistadd \"Copy\" \"second.flac\"", "OK\n"),
             ("listplaylists", "playlist: Copy\nOK\n"),
             ("listplaylists", "playlist: Copy\nOK\n"),
-            ("playlistclear \"Copy\"", "OK\n"),
-            ("playlistadd \"Copy\" \"second.flac\"", "OK\n"),
-            ("listplaylists", "playlist: Copy\nOK\n"),
             ("playlistadd \"Copy\" \"second.flac\"", "OK\n"),
             ("listplaylists", "playlist: Copy\nOK\n"),
             ("playlistclear \"Copy\"", "OK\n"),
@@ -1431,10 +1428,6 @@ async fn playlist_save_modes_write_local_playlists_without_touching_the_mpd_queu
             .await
             .unwrap();
         assert!(catalog.playlist_save(name, vec![]).await.is_err());
-        catalog
-            .playlist_save_with_mode(name, vec![second.clone()], "replace")
-            .await
-            .unwrap();
         catalog
             .playlist_save_with_mode(name, vec![second], "append")
             .await

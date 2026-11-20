@@ -394,6 +394,9 @@ impl Catalog {
                 ensure!(exists, "playlist not found");
             }
             if mode == SaveMode::Replace {
+                if !paths.is_empty() {
+                    return self.local.replace_playlist(&quoted_name, paths).await;
+                }
                 self.local
                     .request(&format!("playlistclear {quoted_name}"))
                     .await?;

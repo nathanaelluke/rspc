@@ -135,6 +135,7 @@ pub enum TuiStep<'a> {
     Key(&'a [u8]),
     WaitFor(&'a [u8]),
     WaitUntilGone(&'a [u8]),
+    Resize { rows: u16, columns: u16 },
 }
 
 impl Harness {
@@ -414,6 +415,19 @@ impl Harness {
                         if !contains(screen.as_bytes(), text) {
                             index += 1;
                         }
+                    }
+                    Some(TuiStep::Resize { rows, columns }) => {
+                        size.ws_row = *rows;
+                        size.ws_col = *columns;
+                        if unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &size) }
+                            < 0
+                        {
+                            return Err(std::io::Error::last_os_error())
+                                .context("Resize test terminal");
+                        }
+                        terminal.screen_mut().set_size(*rows, *columns);
+                        index += 1;
+                        next = Some(Instant::now() + Duration::from_millis(200));
                     }
                     None if !quit => {
                         master.write_all(b"q")?;

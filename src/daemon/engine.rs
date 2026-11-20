@@ -49,28 +49,39 @@ struct Shuffle {
     played: HashSet<u32>,
     remaining: Vec<u32>,
     next_cycle: Vec<u32>,
+    queue_version: Option<u32>,
 }
 impl Shuffle {
     fn sync(&mut self, queue: &Queue, repeat: bool) {
         use rand::seq::SliceRandom;
 
-        let live: HashSet<_> = queue.entries.iter().map(|entry| entry.id).collect();
-        self.played.retain(|id| live.contains(id));
-        if let Some(id) = queue.current {
-            self.played.insert(id);
+        if self.queue_version != Some(queue.version) {
+            let live: HashSet<_> = queue.entries.iter().map(|entry| entry.id).collect();
+            self.played.retain(|id| live.contains(id));
+            self.played.extend(queue.current);
+            self.remaining
+                .retain(|id| live.contains(id) && !self.played.contains(id));
+            let known: HashSet<_> = self.played.iter().chain(&self.remaining).copied().collect();
+            let mut added: Vec<_> = queue
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .filter(|id| !known.contains(id))
+                .collect();
+            added.shuffle(&mut rand::rng());
+            self.remaining.extend(added);
+            self.queue_version = Some(queue.version);
+        } else if let Some(id) = queue.current
+            && self.played.insert(id)
+        {
+            if self.remaining.first() == Some(&id) {
+                self.remaining.remove(0);
+            } else {
+                self.remaining.retain(|candidate| *candidate != id);
+            }
         }
-        self.remaining
-            .retain(|id| live.contains(id) && !self.played.contains(id));
-        let known: HashSet<_> = self.played.iter().chain(&self.remaining).copied().collect();
-        let mut added: Vec<_> = queue
-            .entries
-            .iter()
-            .map(|entry| entry.id)
-            .filter(|id| !known.contains(id))
-            .collect();
-        added.shuffle(&mut rand::rng());
-        self.remaining.extend(added);
         if repeat && self.remaining.is_empty() {
+            let live: HashSet<_> = queue.entries.iter().map(|entry| entry.id).collect();
             let eligible =
                 |id: &u32| live.contains(id) && (!queue.consume || Some(*id) != queue.current);
             self.next_cycle.retain(eligible);
@@ -102,6 +113,25 @@ impl Shuffle {
     }
 }
 impl Player {
+    fn next_target(&self, index: usize) -> Option<PlayTarget> {
+        if self.random && self.single == 0 && !self.stopped {
+            self.pending_ids.first().copied().map(PlayTarget::Shuffled)
+        } else if index + 1 < self.queue.entries.len() {
+            Some(PlayTarget::Position(index + 1))
+        } else if self.repeat && !self.queue.entries.is_empty() {
+            Some(PlayTarget::Position(0))
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn next_song_position(&self, index: usize) -> Option<usize> {
+        if self.single != 0 && !self.stopped {
+            return self.repeat.then_some(index);
+        }
+        self.next_target(index)?.index(&self.queue).ok()
+    }
+
     pub fn playback(&self) -> Playback {
         let entry = self
             .queue
@@ -668,14 +698,8 @@ impl Engine {
             let i = p.queue.cursor().unwrap_or(0);
             let next = if previous {
                 Some(PlayTarget::Position(i.saturating_sub(1)))
-            } else if p.random && p.single == 0 && !p.stopped {
-                p.pending_ids.first().copied().map(PlayTarget::Shuffled)
-            } else if i + 1 < p.queue.entries.len() {
-                Some(PlayTarget::Position(i + 1))
-            } else if p.repeat && !p.queue.entries.is_empty() {
-                Some(PlayTarget::Position(0))
             } else {
-                None
+                p.next_target(i)
             };
             (next, p.queue.current)
         };
@@ -685,15 +709,31 @@ impl Engine {
             self.stop_inner().await;
         }
         if !previous {
-            let mut p = self.player.lock().await;
-            if p.stopped || p.queue.current != old {
-                p.queue.consume_finished(old);
-            }
-            drop(p);
-            self.queue_changed().await;
-            self.changed(vec!["options", "player", "playlist"]);
+            self.finish_transition(old, false).await;
         }
         Ok(())
+    }
+
+    async fn finish_transition(&self, old: Option<u32>, reset_single: bool) {
+        let (consumed, options_changed) = {
+            let mut p = self.player.lock().await;
+            let was_oneshot = p.queue.consume_oneshot;
+            let consumed = (p.stopped || p.queue.current != old) && p.queue.consume_finished(old);
+            if reset_single {
+                p.single = 0;
+            }
+            (
+                consumed,
+                reset_single || was_oneshot != p.queue.consume_oneshot,
+            )
+        };
+        if consumed {
+            self.queue_changed().await;
+        }
+        if options_changed {
+            self.mark_dirty();
+            self.changed(vec!["options"]);
+        }
     }
 
     pub async fn clear_queue(&self) {
@@ -764,24 +804,21 @@ impl Engine {
         result
     }
     async fn finish_queue(&self) -> Result<()> {
-        let (single, repeat, index) = {
+        let (single, repeat, index, current) = {
             let p = self.player.lock().await;
-            (p.single, p.repeat, p.queue.cursor().unwrap_or(0))
+            (
+                p.single,
+                p.repeat,
+                p.queue.cursor().unwrap_or(0),
+                p.queue.current,
+            )
         };
         if single != 0 {
             if repeat {
                 self.play_inner(PlayTarget::Position(index)).await?;
             } else {
                 self.stop_inner().await;
-                let mut p = self.player.lock().await;
-                let old = p.queue.current;
-                p.queue.consume_finished(old);
-                if single == 2 {
-                    p.single = 0;
-                }
-                drop(p);
-                self.queue_changed().await;
-                self.changed(vec!["options", "player", "playlist"]);
+                self.finish_transition(current, single == 2).await;
             }
         } else {
             self.next_inner(false).await?;

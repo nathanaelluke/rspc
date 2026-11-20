@@ -138,9 +138,42 @@ impl QueuePane {
                 self.queue
                     .marked()
                     .iter()
-                    .map(|idx| (*idx, &self.queue.items[*idx])),
+                    .filter_map(|&idx| self.queue.items.get(idx).map(|song| (idx, song))),
             )
         }
+    }
+
+    fn refresh_queue(&mut self, ctx: &Ctx) {
+        let queue = &mut self.queue;
+        let order_changed = !queue
+            .items
+            .iter()
+            .map(|song| song.id)
+            .eq(ctx.queue.iter().map(|song| song.id));
+        if order_changed {
+            let selected_id = queue.selected().map(|song| song.id);
+            let previous_index = queue.state.get_selected().unwrap_or_default();
+            let marked_ids: HashSet<_> = queue.marked_items().map(|song| song.id).collect();
+            *queue.marked_mut() = if marked_ids.is_empty() {
+                std::collections::BTreeSet::new()
+            } else {
+                ctx.queue
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, song)| marked_ids.contains(&song.id).then_some(index))
+                    .collect()
+            };
+            let selection = if ctx.queue.is_empty() {
+                None
+            } else {
+                selected_id
+                    .and_then(|id| ctx.queue.iter().position(|song| song.id == id))
+                    .or(Some(previous_index.min(ctx.queue.len() - 1)))
+            };
+            queue.state.set_content_len(Some(ctx.queue.len()));
+            queue.select_idx_opt(selection, ctx.config.scrolloff);
+        }
+        queue.items.clone_from(&ctx.queue);
     }
 
     fn open_context_menu(&mut self, ctx: &Ctx) {
@@ -476,11 +509,11 @@ impl Pane for QueuePane {
         match event {
             UiEvent::Database => {
                 self.queue.filter_active = false;
-                self.queue.items.clone_from(&ctx.queue);
                 self.queue.unmark_all();
+                self.refresh_queue(ctx);
             }
             UiEvent::QueueChanged => {
-                self.queue.items.clone_from(&ctx.queue);
+                self.refresh_queue(ctx);
             }
             UiEvent::SongChanged => {
                 if let Some((idx, _)) = ctx.find_current_song_in_queue()
@@ -1317,6 +1350,33 @@ mod selection_info_tests {
     use crossbeam::channel::{Receiver, Sender};
     use rstest::rstest;
     use std::sync::Arc;
+
+    #[rstest]
+    fn refreshing_queue_keeps_marks_on_surviving_song_ids(mut ctx: Ctx) {
+        ctx.queue = (1..=5)
+            .map(|id| Song {
+                id,
+                file: "same-track.flac".into(),
+                ..Song::default()
+            })
+            .collect();
+        let mut pane = QueuePane::new(&ctx);
+        pane.queue.select_idx(3, 0);
+        pane.queue.state.mark(1);
+        pane.queue.state.mark(3);
+        pane.queue.state.mark(4);
+
+        ctx.queue.retain(|song| (2..=4).contains(&song.id));
+        ctx.queue.reverse();
+        pane.on_event(&mut UiEvent::QueueChanged, true, &ctx)
+            .expect("refresh queue");
+
+        assert_eq!(pane.queue.selected().map(|song| song.id), Some(4));
+        assert_eq!(
+            pane.items(false).map(|(_, song)| song.id).collect_vec(),
+            [4, 2]
+        );
+    }
 
     #[rstest]
     #[case(false, 3)]

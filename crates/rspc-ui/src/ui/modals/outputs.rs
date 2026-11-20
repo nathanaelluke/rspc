@@ -17,6 +17,7 @@ use crate::{
         ext::rect::RectExt,
         id::{self, Id},
         keys::ActionEvent,
+        macros::status_info,
         mouse_event::{MouseEvent, MouseEventKind},
         mpd_client_ext::{MpdClientExt, PartitionedOutput, PartitionedOutputKind},
     },
@@ -54,6 +55,23 @@ impl OutputsModal {
         let Some(output) = self.outputs.get(idx) else {
             return;
         };
+        let supported = match output.kind {
+            PartitionedOutputKind::OtherPartition => {
+                ctx.supported_commands.contains("moveoutput")
+                    && ctx.supported_commands.contains("enableoutput")
+            }
+            PartitionedOutputKind::CurrentPartition => {
+                ctx.supported_commands.contains("toggleoutput")
+            }
+        };
+        if !supported {
+            if ctx.supported_commands.contains("rspc_identity") {
+                status_info!("Output controls are unavailable in shared mode. Use rspc --local.");
+            } else {
+                status_info!("Output controls are unavailable on this MPD connection.");
+            }
+            return;
+        }
 
         let id = output.id;
         let name = output.name.clone();
@@ -115,6 +133,11 @@ impl Modal for OutputsModal {
             .border_style(ctx.config.as_border_style())
             .title_alignment(ratatui::prelude::Alignment::Center)
             .title("Outputs");
+        let block = if ctx.supported_commands.contains("rspc_identity") {
+            block.title_bottom(" Read only · use rspc --local to change MPD outputs ")
+        } else {
+            block
+        };
 
         let table_area = popup_area.inner(Margin {
             horizontal: 1,

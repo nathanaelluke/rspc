@@ -520,6 +520,47 @@ async fn shuffle_option(engine: &Engine, name: &str, value: &str) {
         .unwrap();
 }
 
+#[tokio::test]
+async fn advancing_notifies_playlist_listeners_only_when_a_track_is_consumed() {
+    let (_dir, engine) = fixture().await;
+    engine.play_id(1).await.unwrap();
+    let mut events = engine.events.subscribe();
+    let initial = events.borrow_and_update().clone();
+
+    engine.next(false).await.unwrap();
+    let advanced = events.borrow_and_update().clone();
+    assert_ne!(initial.get("player"), advanced.get("player"));
+    assert_eq!(initial.get("playlist"), advanced.get("playlist"));
+    assert_eq!(initial.get("options"), advanced.get("options"));
+
+    shuffle_option(&engine, "consume", "oneshot").await;
+    let consuming = events.borrow_and_update().clone();
+    engine.next(false).await.unwrap();
+    let consumed = events.borrow_and_update().clone();
+    assert_ne!(consuming.get("playlist"), consumed.get("playlist"));
+    assert_ne!(consuming.get("options"), consumed.get("options"));
+    assert_eq!(engine.player.lock().await.queue.entries.len(), 2);
+}
+
+#[tokio::test]
+async fn status_predicts_the_next_shuffled_song_from_the_last_queue_position() {
+    let (_dir, engine) = fixture().await;
+    shuffle_option(&engine, "random", "1").await;
+    engine.play_id(3).await.unwrap();
+    let status = super::super::protocol::execute(&engine, &["status".into()])
+        .await
+        .unwrap();
+    let next = String::from_utf8(status)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("nextsongid: "))
+        .expect("an unplayed track remains")
+        .parse::<u32>()
+        .unwrap();
+    engine.finished().await.unwrap();
+    assert_eq!(engine.playback().await.entry.unwrap().id, next);
+}
+
 async fn shuffle_pending(engine: &Engine) -> Vec<u32> {
     engine.player.lock().await.pending_ids.clone()
 }

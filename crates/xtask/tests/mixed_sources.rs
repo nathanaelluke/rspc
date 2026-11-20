@@ -446,6 +446,32 @@ fn local_playlist_edits_need_no_spotify_login() -> Result<()> {
 }
 
 #[test]
+fn replacing_a_local_playlist_with_a_missing_file_preserves_the_original() -> Result<()> {
+    let h = Harness::mixed()?;
+    h.mpd("playlistadd Keep sentinel.wav", "default")?;
+    h.raw("clear")?;
+    h.raw("add mpd:short.wav")?;
+    let queue = h.mpd("playlistinfo", "default")?;
+    let partitions = h.mpd("listpartitions", "default")?;
+    h.raw("save \"Local Playlists/Keep\" replace")?;
+    assert_eq!(h.mpd("listplaylist Keep", "default")?, "file: short.wav\n");
+    h.mpd("playlistclear Keep", "default")?;
+    h.mpd("playlistadd Keep sentinel.wav", "default")?;
+    h.raw("add mpd:long.wav")?;
+    fs::remove_file(h.path("music/long.wav"))?;
+    h.mpd("update", "default")?;
+    wait(|| Ok(h.mpd("stats", "default")?.contains("songs: 2")))?;
+    assert!(h.raw("save \"Local Playlists/Keep\" replace").is_err());
+    assert_eq!(
+        h.mpd("listplaylist Keep", "default")?,
+        "file: sentinel.wav\n"
+    );
+    assert_eq!(h.mpd("playlistinfo", "default")?, queue);
+    assert_eq!(h.mpd("listpartitions", "default")?, partitions);
+    Ok(())
+}
+
+#[test]
 fn audio_url_uses_mpd_in_the_same_queue() -> Result<()> {
     use std::{
         io::{BufRead, BufReader, Write},

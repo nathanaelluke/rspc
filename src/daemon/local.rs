@@ -465,6 +465,39 @@ impl Library {
             return result;
         }
     }
+
+    pub(super) async fn replace_playlist(&self, name: &str, paths: Vec<String>) -> Result<()> {
+        let partition = quote(&format!("rspc-save-{}", uuid::Uuid::new_v4().simple()))?;
+        let mut wire = Wire::open(&self.settings).await?;
+        let result = async {
+            wire.command(&format!("newpartition {partition}")).await?;
+            wire.command(&format!("partition {partition}")).await?;
+            for path in paths {
+                wire.command(&format!("add {path}")).await?;
+            }
+            match wire.command(&format!("save {name} replace")).await {
+                Err(error) if disconnected(&error) => Err(error.context(
+                    "MPD disconnected while saving the playlist. Refresh before retrying",
+                )),
+                result => result.map(|_| ()),
+            }
+        }
+        .await;
+        let cleanup = async {
+            if !wire.synchronized {
+                wire = Wire::open(&self.settings).await?;
+            }
+            wire.command("partition \"default\"").await?;
+            wire.command(&format!("delpartition {partition}")).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = cleanup {
+            log::warn!("Removing temporary MPD playlist partition: {error:#}");
+        }
+        result
+    }
+
     pub async fn invalidate(&self) {
         self.cached.lock().await.take();
         self.unavailable.lock().await.take();
@@ -928,8 +961,22 @@ impl Player {
     }
     pub async fn seek(&self, position: u64) -> Result<()> {
         let mut p = self.state.lock().await;
-        self.control(&mut p, &format!("seekcur {:.3}", position as f64 / 1000.0))
-            .await?;
+        let command = format!("seekcur {:.3}", position as f64 / 1000.0);
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            match self.control(&mut p, &command).await {
+                Ok(()) => break,
+                Err(error)
+                    if error
+                        .downcast_ref::<CommandFailure>()
+                        .is_some_and(|failure| failure.0.ends_with("{seekcur} Not seekable"))
+                        && Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         drop(p);
         self.observe().await
     }

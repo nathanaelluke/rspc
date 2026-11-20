@@ -5,6 +5,54 @@ use std::{fs, io::BufRead, os::unix::fs::PermissionsExt, thread, time::Duration}
 use support::{Harness, Protocol, contains, quote, state_is, wait};
 
 #[test]
+fn auxiliary_panels_and_song_info_survive_terminal_resizes() -> Result<()> {
+    use support::TuiStep::{Key, Resize, WaitFor, WaitUntilGone};
+
+    let h = Harness::demo()?;
+    h.tui_steps(
+        &[
+            Key(b"oi"),
+            WaitFor(b"Song info"),
+            Resize {
+                rows: 48,
+                columns: 240,
+            },
+            Key(b"j"),
+            WaitFor(b"Song info"),
+            Resize {
+                rows: 20,
+                columns: 64,
+            },
+            Key(b"k"),
+            WaitFor(b"Song info"),
+            Key(b"\x1b"),
+            WaitUntilGone(b"Song info"),
+            Key(b"?"),
+            WaitFor(b"Keybinds"),
+            Key(b"\x1b"),
+            Key(b"oo"),
+            WaitFor(b"Outputs"),
+            Key(b"\r"),
+            WaitFor(b"use rspc --local"),
+            Key(b"\x1b"),
+            Key(b"op"),
+            WaitFor(b"Decoder plugins"),
+            Key(b"\x1b"),
+            Key(b"od"),
+            WaitFor(b"No downloads"),
+            Key(b"\x1b"),
+            Key(b"R"),
+            WaitFor(b"Count:"),
+            Key(b"\x1b"),
+            WaitUntilGone(b"Count:"),
+        ],
+        false,
+    )?;
+    assert_eq!(h.queue()?.as_array().unwrap().len(), 3);
+    Ok(())
+}
+
+#[test]
 fn random_songs_sample_the_spotify_library() -> Result<()> {
     let h = Harness::demo()?;
     h.raw("clear")?;
