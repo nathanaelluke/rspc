@@ -11,6 +11,7 @@ pub struct DirState<T: ScrollingState> {
     pub marked: BTreeSet<usize>,
     content_len: Option<usize>,
     viewport_len: Option<usize>,
+    range_anchor: Option<usize>,
 }
 
 #[allow(dead_code)]
@@ -34,6 +35,10 @@ impl<T: ScrollingState> DirState<T> {
     }
 
     pub fn set_content_len(&mut self, content_len: Option<usize>) {
+        if self.content_len != content_len && self.finish_range_selection() {
+            self.marked
+                .retain(|index| content_len.is_some_and(|len| *index < len));
+        }
         match (content_len, self.viewport_len) {
             (Some(content_len), Some(viewport_len)) => {
                 self.set_content_and_viewport_len(content_len, viewport_len);
@@ -48,6 +53,9 @@ impl<T: ScrollingState> DirState<T> {
     }
 
     pub fn set_content_and_viewport_len(&mut self, content_len: usize, viewport_len: usize) {
+        if self.content_len != Some(content_len) && self.finish_range_selection() {
+            self.marked.retain(|index| *index < content_len);
+        }
         self.content_len = Some(content_len);
         self.viewport_len = Some(viewport_len);
 
@@ -112,7 +120,7 @@ impl<T: ScrollingState> DirState<T> {
     }
 
     pub fn next(&mut self, scrolloff: usize, wrap: bool) {
-        if wrap {
+        if wrap && self.range_anchor.is_none() {
             self.next_wrapping(scrolloff);
         } else {
             self.next_non_wrapping(scrolloff);
@@ -120,7 +128,7 @@ impl<T: ScrollingState> DirState<T> {
     }
 
     pub fn prev(&mut self, scrolloff: usize, wrap: bool) {
-        if wrap {
+        if wrap && self.range_anchor.is_none() {
             self.prev_wrapping(scrolloff);
         } else {
             self.prev_non_wrapping(scrolloff);
@@ -318,7 +326,27 @@ impl<T: ScrollingState> DirState<T> {
     pub fn select(&mut self, idx: Option<usize>, scrolloff: usize) {
         let content_len = self.content_len.unwrap_or_default();
         let idx = idx.map(|idx| idx.min(content_len.saturating_sub(1)));
+        let previous = self.get_selected();
         self.inner.select_scrolling(idx);
+        if let Some(anchor) = self.range_anchor {
+            if let Some(index) = idx.filter(|_| content_len > 0) {
+                // Update only the changed ends of the range. Rebuilding all
+                // marks on each cursor step gets expensive in large libraries.
+                let previous = previous.unwrap_or(anchor);
+                let (old_start, old_end) = (anchor.min(previous), anchor.max(previous));
+                let (start, end) = (anchor.min(index), anchor.max(index));
+                for index in old_start..start {
+                    self.marked.remove(&index);
+                }
+                for index in end.saturating_add(1)..=old_end {
+                    self.marked.remove(&index);
+                }
+                self.marked.extend(start..old_start);
+                self.marked.extend(old_end.saturating_add(1)..=end);
+            } else {
+                self.finish_range_selection();
+            }
+        }
         self.apply_scrolloff(scrolloff);
 
         self.scrollbar_state = self.scrollbar_state.position(self.offset());
@@ -358,6 +386,7 @@ impl<T: ScrollingState> DirState<T> {
 
     #[allow(clippy::comparison_chain)]
     pub fn remove(&mut self, idx: usize) {
+        self.finish_range_selection();
         match self.content_len {
             Some(len) if idx >= len => return,
             None => return,
@@ -384,18 +413,24 @@ impl<T: ScrollingState> DirState<T> {
     }
 
     pub fn unmark_all(&mut self) {
+        self.finish_range_selection();
         self.marked.clear();
     }
 
     pub fn mark(&mut self, idx: usize) -> bool {
+        self.finish_range_selection();
         self.marked.insert(idx)
     }
 
     pub fn unmark(&mut self, idx: usize) -> bool {
+        self.finish_range_selection();
         self.marked.remove(&idx)
     }
 
     pub fn toggle_mark(&mut self, idx: usize) -> bool {
+        if self.finish_range_selection() {
+            return self.marked.contains(&idx);
+        }
         if self.marked.contains(&idx) {
             self.marked.remove(&idx)
         } else {
@@ -404,6 +439,7 @@ impl<T: ScrollingState> DirState<T> {
     }
 
     pub fn invert_marked(&mut self) {
+        self.finish_range_selection();
         let Some(content_len) = self.content_len else {
             log::warn!("Failed to invert marked items because content length is None");
             return;
@@ -414,6 +450,24 @@ impl<T: ScrollingState> DirState<T> {
 
     pub fn get_marked(&self) -> &BTreeSet<usize> {
         &self.marked
+    }
+
+    pub fn toggle_range_selection(&mut self) {
+        if self.finish_range_selection() {
+            return;
+        }
+        if let Some(index) = self
+            .get_selected()
+            .filter(|index| self.content_len.is_some_and(|len| *index < len))
+        {
+            self.range_anchor = Some(index);
+            self.marked.clear();
+            self.marked.insert(index);
+        }
+    }
+
+    pub fn finish_range_selection(&mut self) -> bool {
+        self.range_anchor.take().is_some()
     }
 
     pub fn get_selected(&self) -> Option<usize> {
@@ -455,6 +509,45 @@ mod tests {
     use ratatui::widgets::ListState;
 
     use super::DirState;
+
+    #[test]
+    fn range_selection_expands_contracts_and_commits_with_mark() {
+        let mut state = DirState::<ListState>::default();
+        state.set_content_and_viewport_len(6, 6);
+        state.select(Some(2), 0);
+        state.toggle_range_selection();
+        state.select(Some(5), 0);
+        assert_eq!(state.marked, (2..=5).collect());
+        state.select(Some(3), 0);
+        assert_eq!(state.marked, (2..=3).collect());
+        state.select(Some(0), 0);
+        assert_eq!(state.marked, (0..=2).collect());
+        state.toggle_mark(0);
+        state.select(Some(5), 0);
+        assert_eq!(state.marked, (0..=2).collect());
+        state.unmark_all();
+        state.select(Some(1), 0);
+        assert!(state.marked.is_empty());
+    }
+
+    #[test]
+    fn range_selection_stays_in_bounds_and_ends_when_rows_change() {
+        let mut state = DirState::<ListState>::default();
+        state.toggle_range_selection();
+        assert!(state.marked.is_empty());
+        state.set_content_and_viewport_len(3, 3);
+        state.last();
+        state.toggle_range_selection();
+        state.next(0, true);
+        assert_eq!(state.get_selected(), Some(2));
+        assert_eq!(state.marked, [2].into());
+        state.first();
+        state.prev(0, true);
+        assert_eq!(state.get_selected(), Some(0));
+        state.set_content_len(Some(1));
+        assert!(!state.finish_range_selection());
+        assert_eq!(state.marked, [0].into());
+    }
 
     #[test]
     fn viewport_len_sets_properties() {

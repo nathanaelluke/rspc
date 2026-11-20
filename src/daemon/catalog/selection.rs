@@ -68,6 +68,34 @@ fn songs<'a>(tracks: impl IntoIterator<Item = &'a TrackInfo>) -> Info {
 }
 
 impl Catalog {
+    pub async fn library_tracks(self: &Arc<Self>) -> Result<Vec<TrackInfo>> {
+        if self.demo {
+            return self.liked().await;
+        }
+        let spotify = async {
+            let mut tracks = self.liked().await?;
+            tracks.extend(self.album_tracks_many(&self.saved_albums().await?).await?);
+            let mut seen = HashSet::new();
+            tracks.retain(|track| {
+                track
+                    .uri
+                    .as_ref()
+                    .is_some_and(|uri| seen.insert(uri.clone()))
+            });
+            Ok::<_, anyhow::Error>(tracks)
+        };
+        let (spotify, local) = tokio::join!(spotify, self.local.all());
+        let tracks = match spotify {
+            Ok(tracks) => tracks,
+            Err(error) if local.is_err() => return Err(error),
+            Err(_) => Vec::new(),
+        };
+        Ok(prefer_local_tracks(
+            tracks,
+            local.map_or_else(|_| Vec::new(), |tracks| tracks.as_ref().clone()),
+        ))
+    }
+
     pub fn library_directories(kind: &str, names: Vec<String>) -> Vec<String> {
         let mut labels = BTreeMap::new();
         for name in names {
@@ -142,6 +170,7 @@ impl Catalog {
             }
             ensure!(visited.len() <= 100_000, "selection has too many folders");
             match path.as_str() {
+                "" | "/" => tracks.extend(self.library_tracks().await?),
                 "Albums" => {
                     if self.demo {
                         tracks.extend(self.liked().await?);

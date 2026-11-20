@@ -419,6 +419,7 @@ impl SearchPane {
                 CommonAction::NextResult => {}
                 CommonAction::PreviousResult => {}
                 CommonAction::Select => {}
+                CommonAction::SelectRange => {}
                 CommonAction::InvertSelection => {}
                 CommonAction::Rename => {}
                 CommonAction::Close => {}
@@ -692,6 +693,10 @@ impl SearchPane {
                 }
                 CommonAction::Select => {
                     self.songs_dir.toggle_mark_selected();
+                    ctx.render()?;
+                }
+                CommonAction::SelectRange => {
+                    self.songs_dir.state.toggle_range_selection();
                     ctx.render()?;
                 }
                 CommonAction::InvertSelection => {

@@ -42,6 +42,7 @@ pub struct MenuModal<'a> {
     id: Id,
     filter: Option<String>,
     filter_buffer_id: BufferId,
+    displayed: bool,
 }
 
 impl Modal for MenuModal<'_> {
@@ -59,6 +60,12 @@ impl Modal for MenuModal<'_> {
         if changed {
             self.refresh_labels();
         }
+        // Resolve membership before the first frame so the popup opens at its
+        // final size instead of shifting rows from a loading placeholder.
+        if self.waiting_for_library() {
+            return Ok(());
+        }
+        self.displayed = true;
         let needed_height: usize = self
             .sections
             .iter()
@@ -149,6 +156,9 @@ impl Modal for MenuModal<'_> {
                 InputResultEvent::NoChange => {}
             }
         } else {
+            if self.waiting_for_library() {
+                return Ok(());
+            }
             match kind {
                 InputResultEvent::Push => {}
                 InputResultEvent::Pop => {}
@@ -169,6 +179,11 @@ impl Modal for MenuModal<'_> {
 
     fn handle_key(&mut self, key: &mut ActionEvent, ctx: &mut Ctx) -> Result<()> {
         if let Some(action) = key.claim_common() {
+            if self.waiting_for_library()
+                && !matches!(action, CommonAction::Close | CommonAction::EnterSearch)
+            {
+                return Ok(());
+            }
             match action {
                 CommonAction::EnterSearch => {
                     ctx.input.insert_mode(self.filter_buffer_id);
@@ -234,6 +249,9 @@ impl Modal for MenuModal<'_> {
     }
 
     fn handle_mouse_event(&mut self, event: MouseEvent, ctx: &mut Ctx) -> Result<()> {
+        if self.waiting_for_library() {
+            return Ok(());
+        }
         match event.kind {
             MouseEventKind::LeftClick => {
                 if let Some(idx) = self.section_idx_at_position(event.into()) {
@@ -330,6 +348,10 @@ impl Modal for MenuModal<'_> {
 }
 
 impl<'a> MenuModal<'a> {
+    fn waiting_for_library(&self) -> bool {
+        !self.displayed && self.sections.iter().any(|section| matches!(section, SectionType::Menu(section) if super::library::is_loading(section)))
+    }
+
     pub fn new(_ctx: &Ctx) -> Self {
         Self {
             sections: Vec::default(),
@@ -340,6 +362,7 @@ impl<'a> MenuModal<'a> {
             id: id::new(),
             filter: None,
             filter_buffer_id: BufferId::new(),
+            displayed: false,
         }
     }
 

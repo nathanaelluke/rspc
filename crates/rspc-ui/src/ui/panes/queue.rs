@@ -301,7 +301,7 @@ impl Pane for QueuePane {
         let marker_symbol_len = config.theme.symbols.marker.width();
 
         let current_song_id = ctx.find_current_song_in_queue().map(|(_, song)| song.id);
-        let marked = std::mem::take(self.queue.marked_mut());
+        let marked = std::mem::take(&mut self.queue.state.marked);
         let filter = ctx.input.value(self.queue.filter_buffer_id);
 
         let table = VirtualizedTable::new(&self.queue.items)
@@ -367,7 +367,7 @@ impl Pane for QueuePane {
         frame.render_widget(table_block, self.areas[Areas::Table]);
         frame.render_stateful_widget(table, self.areas[Areas::Table], &mut self.queue.state);
 
-        let _ = std::mem::replace(self.queue.marked_mut(), marked);
+        self.queue.state.marked = marked;
 
         if let Some(scrollbar) = config.as_styled_scrollbar()
             && self.areas[Areas::Scrollbar].width > 0
@@ -833,6 +833,7 @@ impl Pane for QueuePane {
                     ctx.render()?;
                 }
                 CommonAction::MoveUp if !self.queue.marked().is_empty() => {
+                    self.queue.state.finish_range_selection();
                     if self.queue.is_empty() {
                         return Ok(());
                     }
@@ -875,6 +876,7 @@ impl Pane for QueuePane {
                     return Ok(());
                 }
                 CommonAction::MoveDown if !self.queue.marked().is_empty() => {
+                    self.queue.state.finish_range_selection();
                     if self.queue.is_empty() {
                         return Ok(());
                     }
@@ -1024,6 +1026,10 @@ impl Pane for QueuePane {
                         self.queue.toggle_mark_selected();
                         ctx.render()?;
                     }
+                }
+                CommonAction::SelectRange => {
+                    self.queue.state.toggle_range_selection();
+                    ctx.render()?;
                 }
                 CommonAction::InvertSelection => {
                     self.queue.invert_marked();

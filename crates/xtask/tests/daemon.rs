@@ -5,6 +5,43 @@ use std::{fs, io::BufRead, os::unix::fs::PermissionsExt, thread, time::Duration}
 use support::{Harness, Protocol, contains, quote, state_is, wait};
 
 #[test]
+fn random_songs_sample_the_spotify_library() -> Result<()> {
+    let h = Harness::demo()?;
+    h.raw("clear")?;
+    h.cli(&["addrandom", "song", "2"])?;
+    let queue = h.queue()?;
+    let tracks = queue.as_array().unwrap();
+    assert_eq!(tracks.len(), 2);
+    assert!(tracks.iter().all(|track| {
+        track["file"]
+            .as_str()
+            .unwrap()
+            .starts_with("spotify:track:")
+    }));
+    assert_ne!(tracks[0]["file"], tracks[1]["file"]);
+    Ok(())
+}
+
+#[test]
+fn visual_selection_moves_and_deletes_a_contiguous_queue_block() -> Result<()> {
+    let h = Harness::demo()?;
+    let original = h.queue()?.as_array().unwrap().clone();
+    h.tui(&[b"V", b"j", b"J"], false)?;
+    let moved = h.queue()?.as_array().unwrap().clone();
+    assert_eq!(
+        moved.iter().map(|track| &track["file"]).collect::<Vec<_>>(),
+        vec![
+            &original[2]["file"],
+            &original[0]["file"],
+            &original[1]["file"]
+        ]
+    );
+    h.tui(&[b"V", b"j", b"d"], false)?;
+    assert_eq!(h.queue()?.as_array().unwrap().len(), 1);
+    Ok(())
+}
+
+#[test]
 fn quit_reopen_and_terminal_hangup_keep_playing() -> Result<()> {
     let h = Harness::demo()?;
     h.cli(&["play", "0"])?;

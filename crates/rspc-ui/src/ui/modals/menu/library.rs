@@ -225,6 +225,13 @@ pub(super) fn start_loading(section: &mut ListSection, ctx: &Ctx, modal: Id, ind
     true
 }
 
+pub(super) fn is_loading(section: &ListSection) -> bool {
+    section
+        .library
+        .as_ref()
+        .is_some_and(|request| !matches!(request.state, LoadState::Ready))
+}
+
 pub(super) fn apply(section: &mut ListSection, data: &mut LibraryData, ctx: &Ctx) -> bool {
     let Some(request) = section.library.as_mut() else {
         return false;
@@ -371,7 +378,9 @@ fn update_liked_songs(
         "rspc_library_add"
     };
     if !ctx.supported_commands.contains(command) {
-        status_warn!("The connected server does not support Spotify Liked Songs");
+        status_warn!(
+            "Spotify Liked Songs is unavailable on this server. Open rspc without --local; if rspc is already running, run `rspc stop` and reopen it to update the daemon."
+        );
         return;
     }
     ctx.liked_song_uris.borrow_mut().take();
@@ -474,29 +483,14 @@ mod save_action_tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(text.contains("Loading library"));
-        let cells = terminal.backend().buffer();
-        let row = (0..20)
-            .find(|y| {
-                (0..80)
-                    .map(|x| cells[(x, *y)].symbol())
-                    .collect::<String>()
-                    .contains("Loading library")
-            })
-            .expect("loading row");
-        let column = (0..80)
-            .find(|x| cells[(*x, row)].symbol() == "L")
-            .expect("loading label");
+        assert!(!text.contains("Loading library"));
+        assert!(!text.contains("Add to playlist"));
         for kind in [
             crate::shared::mouse_event::MouseEventKind::LeftClick,
             crate::shared::mouse_event::MouseEventKind::DoubleClick,
         ] {
             menu.handle_mouse_event(
-                crate::shared::mouse_event::MouseEvent {
-                    x: column,
-                    y: row,
-                    kind,
-                },
+                crate::shared::mouse_event::MouseEvent { x: 40, y: 10, kind },
                 &mut ctx,
             )
             .expect("click disabled loading item");

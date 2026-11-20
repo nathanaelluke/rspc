@@ -83,11 +83,12 @@ where
         // we are rendering from item 0 to viewport_len, the rest will be ignored
         let original_offset = state.offset();
         let original_selected = state.inner.selected();
+        // These are viewport-relative rendering coordinates, not a cursor
+        // move. Do not change logical marks or a visual-selection anchor.
+        state
+            .inner
+            .select(original_selected.map(|v| v.saturating_sub(original_offset)));
         *state.inner.offset_mut() = 0;
-        state.select(
-            original_selected.map(|v| v.saturating_sub(original_offset)),
-            0,
-        );
 
         let actual_rows = self
             .items
@@ -103,7 +104,34 @@ where
         StatefulWidget::render(table, area, buf, state.as_render_state_ref());
 
         // Restore the original state
+        state.inner.select(original_selected);
         *state.inner.offset_mut() = original_offset;
-        state.select(original_selected, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rendering_a_scrolled_queue_preserves_visual_selection() {
+        let items = vec![(); 1000];
+        let mut state = DirState::<TableState>::default();
+        state.set_content_and_viewport_len(items.len(), 10);
+        state.select(Some(905), 0);
+        *state.inner.offset_mut() = 900;
+        state.toggle_range_selection();
+        state.next(0, false);
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buffer = Buffer::empty(area);
+        let table = VirtualizedTable::new(&items)
+            .column_widths([Constraint::Length(20)])
+            .map_fn(|_, ()| Row::new(["song"]));
+        StatefulWidget::render(table, area, &mut buffer, &mut state);
+        assert_eq!(state.get_selected(), Some(906));
+        assert_eq!(state.offset(), 900);
+        assert_eq!(state.marked, [905, 906].into());
+        state.next(0, false);
+        assert_eq!(state.marked, [905, 906, 907].into());
     }
 }

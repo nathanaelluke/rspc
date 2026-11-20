@@ -853,6 +853,13 @@ impl MpdClient for Client<'_> {
     }
 
     fn list_all(&mut self, path: Option<&str>) -> MpdResult<ListAll> {
+        if self.supported_commands.contains("rspc_identity") {
+            return self.with_catalog_timeout(|client| {
+                client
+                    .send_list_all(path)
+                    .and_then(|()| client.read_response())
+            });
+        }
         self.send_list_all(path).and_then(|()| self.read_response())
     }
 

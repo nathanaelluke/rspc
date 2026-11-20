@@ -746,6 +746,17 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
             if command == "listallinfo" {
                 return Ok(list_songs(engine, engine.catalog.selection_tracks(path).await?).await);
             }
+            if command == "listall" && (path.is_empty() || path == "/") {
+                return Ok(engine
+                    .catalog
+                    .library_tracks()
+                    .await?
+                    .iter()
+                    .filter_map(|track| track.uri.as_ref())
+                    .map(|uri| format!("file: {}\n", clean(uri)))
+                    .collect::<String>()
+                    .into_bytes());
+            }
             if path == "People" || path.starts_with("People/") {
                 let (directories, tracks) = engine.catalog.browse_people(path).await?;
                 let mut reply = directories

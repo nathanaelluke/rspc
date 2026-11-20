@@ -137,6 +137,7 @@ impl Default for KeyConfigFile {
             (s().char('n'),                       C::NextResult),
             (s().char('N'),                       C::PreviousResult),
             (s().char('m'),                       C::Select),
+            (s().char('V'),                       C::SelectRange),
             (s().char(' ').ctrl(),                C::InvertSelection),
             (s().char('a'),                       C::Add),
             (s().char('A'),                       C::AddAll),

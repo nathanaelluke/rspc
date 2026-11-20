@@ -834,6 +834,7 @@ pub enum CommonActionFile {
     NextResult,
     PreviousResult,
     Select,
+    SelectRange,
     InvertSelection,
     Delete,
     Rename,
@@ -902,6 +903,7 @@ pub enum CommonAction {
     NextResult,
     PreviousResult,
     Select,
+    SelectRange,
     InvertSelection,
     Delete,
     Rename,
@@ -953,6 +955,7 @@ impl ToDescription for CommonAction {
             CommonAction::Select => {
                 "Mark current item as selected in the browser, useful for example when you want to add multiple songs to a playlist".into()
             }
+            CommonAction::SelectRange => "Start or finish a contiguous selection; move the cursor to extend it".into(),
             CommonAction::InvertSelection => "Inverts the current selected items".into(),
             CommonAction::Delete => {
                 "Delete selected items. In Liked Songs, remove selected or marked songs from Spotify Liked Songs".into()
@@ -1134,6 +1137,7 @@ impl TryFrom<CommonActionFile> for CommonAction {
             CommonActionFile::NextResult => CommonAction::NextResult,
             CommonActionFile::PreviousResult => CommonAction::PreviousResult,
             CommonActionFile::Select => CommonAction::Select,
+            CommonActionFile::SelectRange => CommonAction::SelectRange,
             CommonActionFile::InvertSelection => CommonAction::InvertSelection,
             CommonActionFile::Add => CommonAction::AddOptions {
                 kind: AddKind::Action(AddOpts {

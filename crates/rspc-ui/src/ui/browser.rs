@@ -581,9 +581,17 @@ where
                 ctx.render()?;
             }
             CommonAction::MoveUp => {
+                self.stack_mut()
+                    .current_mut()
+                    .state
+                    .finish_range_selection();
                 self.move_selected(MoveDirection::Up, ctx);
             }
             CommonAction::MoveDown => {
+                self.stack_mut()
+                    .current_mut()
+                    .state
+                    .finish_range_selection();
                 self.move_selected(MoveDirection::Down, ctx);
             }
             CommonAction::DownHalf => {
@@ -663,6 +671,13 @@ where
             }
             CommonAction::Select => {
                 self.stack_mut().current_mut().toggle_mark_selected();
+                ctx.render()?;
+            }
+            CommonAction::SelectRange => {
+                self.stack_mut()
+                    .current_mut()
+                    .state
+                    .toggle_range_selection();
                 ctx.render()?;
             }
             CommonAction::Close if !self.stack().current().marked().is_empty() => {

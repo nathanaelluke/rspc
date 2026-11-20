@@ -144,6 +144,7 @@ impl TagBrowserPane {
             .map(|item| item.as_path().to_owned())
             .collect();
         dir.items = names.into_iter().map(DirOrSong::name_only).collect();
+        dir.state.finish_range_selection();
         dir.state.set_content_len(Some(dir.items.len()));
         dir.state.marked = dir
             .items

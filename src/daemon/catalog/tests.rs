@@ -1,5 +1,42 @@
 use super::*;
 
+#[tokio::test]
+async fn random_library_pool_includes_likes_and_saved_albums_without_duplicate_uris() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut catalog = Catalog::new(false);
+    catalog.disk_root = directory.path().join("catalog");
+    catalog.versions.get_mut().unwrap().clear();
+    let liked = playlist_track(0);
+    let album_only = playlist_track(1);
+    let mut album = liked["album"].clone();
+    album["rspc_track_uris"] = json!([liked["uri"], album_only["uri"], liked["uri"]]);
+    cache_page(&catalog, "me/tracks", 0, vec![json!({"track":liked})], 1);
+    cache_page(&catalog, "me/albums", 0, vec![json!({"album":album})], 1);
+    let catalog = Arc::new(catalog);
+    catalog
+        .remember(vec![
+            track_from_json(&liked).unwrap(),
+            track_from_json(&album_only).unwrap(),
+        ])
+        .await;
+    let _network = catalog
+        .limit
+        .acquire_many(catalog.limit.available_permits() as u32)
+        .await
+        .unwrap();
+    let tracks = tokio::time::timeout(Duration::from_secs(2), catalog.library_tracks())
+        .await
+        .expect("cached library reads must not fetch unrelated metadata")
+        .unwrap();
+    assert_eq!(
+        tracks
+            .iter()
+            .filter_map(|track| track.uri.as_deref())
+            .collect::<Vec<_>>(),
+        ["spotify:track:fixture0", "spotify:track:fixture1"]
+    );
+}
+
 #[test]
 fn merged_results_prefer_playable_local_copies_without_hiding_other_recordings() {
     let spotify = TrackInfo {

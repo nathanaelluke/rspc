@@ -75,6 +75,7 @@ fn common_section(action: &CommonAction) -> &'static str {
         A::AddToLikedSongs { .. } | A::Save { .. } | A::DeleteFromPlaylist { .. } => "Library",
         A::AddOptions { .. } => "Queue",
         A::Select
+        | A::SelectRange
         | A::InvertSelection
         | A::Delete
         | A::Rename

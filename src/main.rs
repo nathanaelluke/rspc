@@ -197,6 +197,7 @@ async fn daemon_ready(socket: &Path, demo: bool) -> Result<bool> {
 }
 async fn start_daemon(args: &Args, paths: &Paths) -> Result<()> {
     if daemon_ready(&paths.socket, args.demo).await? {
+        ensure_daemon_compatible(&paths.socket).await?;
         return Ok(());
     }
     let log = fs::OpenOptions::new()
@@ -241,6 +242,18 @@ async fn start_daemon(args: &Args, paths: &Paths) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     bail!("daemon did not become ready; see {}", paths.log.display())
+}
+async fn ensure_daemon_compatible(socket: &Path) -> Result<()> {
+    let commands = request(socket, "commands").await?;
+    anyhow::ensure!(
+        ["rspc_library_add", "rspc_library_remove"]
+            .iter()
+            .all(|command| commands
+                .lines()
+                .any(|line| line.strip_prefix("command: ") == Some(*command))),
+        "The running rspc daemon is missing Spotify library support. Run `rspc stop`, then reopen rspc to load the updated daemon."
+    );
+    Ok(())
 }
 fn frontend(args: &Args) -> Result<PathBuf> {
     let path = match &args.frontend {
@@ -422,6 +435,39 @@ mod tests {
         });
         assert!(request(&socket, "status").await.is_err());
         server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn launcher_detects_stale_daemons_before_opening_the_interface() {
+        for (commands, supported) in [
+            ("command: status\n", false),
+            (
+                "command: rspc_library_add\ncommand: rspc_library_remove\n",
+                true,
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("daemon.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                stream.write_all(b"OK MPD 0.24.0\n").await.unwrap();
+                let mut read = BufReader::new(stream);
+                let mut line = String::new();
+                read.read_line(&mut line).await.unwrap();
+                assert_eq!(line, "commands\n");
+                read.get_mut()
+                    .write_all(format!("{commands}OK\n").as_bytes())
+                    .await
+                    .unwrap();
+            });
+            let result = ensure_daemon_compatible(&socket).await;
+            if supported {
+                result.unwrap();
+            } else {
+                assert!(result.unwrap_err().to_string().contains("rspc stop"));
+            }
+            server.await.unwrap();
+        }
     }
     #[test]
     fn pairing_repair_and_catalog_login_cannot_run_together() {

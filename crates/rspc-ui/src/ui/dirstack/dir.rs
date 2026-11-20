@@ -364,6 +364,7 @@ where
     }
 
     pub fn marked_mut(&mut self) -> &mut BTreeSet<usize> {
+        self.state.finish_range_selection();
         &mut self.state.marked
     }
 

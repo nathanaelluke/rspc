@@ -109,6 +109,7 @@
             "gg":         Top,
             "G":          Bottom,
             "m":          Select,
+            "V":          SelectRange,
             "<C-Space>":  InvertSelection,
             "/":          EnterSearch,
             "n":          NextResult,
