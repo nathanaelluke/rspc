@@ -1,6 +1,13 @@
 use super::*;
 use crate::daemon::local;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SaveMode {
+    Create,
+    Replace,
+    Append,
+}
+
 impl Catalog {
     pub async fn reload_playlist_settings(&self) -> Result<bool> {
         let changed = self.playlist_settings.lock().unwrap().refresh()?;
@@ -340,62 +347,117 @@ impl Catalog {
         self.playlist_changed(Some(&id)).await
     }
     pub async fn playlist_save(self: &Arc<Self>, name: &str, tracks: Vec<TrackInfo>) -> Result<()> {
+        self.playlist_save_with_mode(name, tracks, "create").await
+    }
+    pub async fn playlist_save_with_mode(
+        self: &Arc<Self>,
+        name: &str,
+        tracks: Vec<TrackInfo>,
+        mode: &str,
+    ) -> Result<()> {
+        let mode = match mode {
+            "create" => SaveMode::Create,
+            "replace" => SaveMode::Replace,
+            "append" => SaveMode::Append,
+            _ => bail!("invalid playlist save mode"),
+        };
         ensure!(!name.is_empty(), "empty playlist name");
         if let Some(name) = name.strip_prefix(local::PLAYLISTS) {
-            ensure!(
-                !self
-                    .local
-                    .playlists()
-                    .await?
-                    .iter()
-                    .any(|n| n.strip_prefix(local::PLAYLISTS) == Some(name)),
-                "playlist already exists"
-            );
-            ensure!(
-                tracks
-                    .iter()
-                    .all(|t| t.uri.as_deref().is_some_and(|u| u.starts_with("mpd:"))),
-                "MPD playlists cannot play Spotify entries"
-            );
-            self.local
-                .request(&format!(
-                    "playlistadd {} {}",
-                    local::quote(name)?,
-                    local::quote(&local::playlist_uri(
-                        tracks
-                            .first()
-                            .and_then(|t| t.uri.as_deref())
-                            .context("cannot save an empty local playlist")?
-                    )?)?
-                ))
-                .await?;
-            for track in tracks.iter().skip(1) {
-                self.playlist_add(
-                    &format!("{}{}", local::PLAYLISTS, name),
-                    track.uri.as_deref().unwrap(),
-                    None,
-                )
-                .await?;
+            ensure!(!name.is_empty(), "empty playlist name");
+            let quoted_name = local::quote(name)?;
+            let paths = tracks
+                .iter()
+                .map(|track| {
+                    let uri = track.uri.as_deref().context("track has no URI")?;
+                    ensure!(
+                        uri.starts_with("mpd:"),
+                        "MPD playlists cannot play Spotify entries"
+                    );
+                    let path = local::playlist_uri(uri)?;
+                    ensure!(
+                        !path.starts_with("spotify:"),
+                        "MPD playlists cannot play Spotify URIs"
+                    );
+                    local::quote(&path)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let exists = self
+                .local
+                .playlists()
+                .await?
+                .iter()
+                .any(|n| n.strip_prefix(local::PLAYLISTS) == Some(name));
+            if mode == SaveMode::Create {
+                ensure!(!exists, "playlist already exists");
+                ensure!(!paths.is_empty(), "cannot save an empty local playlist");
+            } else {
+                ensure!(exists, "playlist not found");
+            }
+            if mode == SaveMode::Replace {
+                self.local
+                    .request(&format!("playlistclear {quoted_name}"))
+                    .await?;
+            }
+            for path in paths {
+                self.local
+                    .request(&format!("playlistadd {quoted_name} {path}"))
+                    .await?;
             }
             return Ok(());
         }
-        ensure!(
-            !self.playlist_names().await?.contains_key(name),
-            "playlist already exists"
-        );
-        if self.demo {
-            self.demo_playlists.lock().await.insert(name.into(), tracks);
-            return Ok(());
-        }
         let uris = tracks
-            .into_iter()
-            .map(|t| t.uri.context("track has no URI"))
+            .iter()
+            .map(|track| track.uri.clone().context("track has no URI"))
             .collect::<Result<Vec<_>>>()?;
         ensure!(
-            uris.iter().all(|u| u.starts_with("spotify:track:")),
+            uris.iter().all(|uri| uri.starts_with("spotify:track:")),
             "Spotify playlists cannot contain local files; the shared queue is saved automatically"
         );
-        crate::spotify::create_playlist(name, uris).await?;
-        self.playlist_changed(None).await
+        if self.demo {
+            let mut playlists = self.demo_playlists.lock().await;
+            if mode == SaveMode::Create {
+                ensure!(!playlists.contains_key(name), "playlist already exists");
+                playlists.insert(name.into(), tracks);
+            } else {
+                let playlist = playlists.get_mut(name).context("playlist not found")?;
+                if mode == SaveMode::Replace {
+                    *playlist = tracks;
+                } else {
+                    playlist.extend(tracks);
+                }
+            }
+            return Ok(());
+        }
+        for uri in &uris {
+            ensure!(
+                matches!(
+                    librespot_core::SpotifyUri::from_uri(uri)?,
+                    librespot_core::SpotifyUri::Track { .. }
+                ),
+                "Spotify playlists accept Spotify tracks only"
+            );
+        }
+        let id = self.playlist_names().await?.get(name).cloned();
+        if mode == SaveMode::Create {
+            ensure!(id.is_none(), "playlist already exists");
+            crate::spotify::create_playlist(name, uris).await?;
+            return self.playlist_changed(None).await;
+        }
+        let id = id.context("playlist not found")?;
+        if mode == SaveMode::Append && uris.is_empty() {
+            return Ok(());
+        }
+        let change = if mode == SaveMode::Replace {
+            crate::spotify::PlaylistChange::Replace { uris }
+        } else {
+            crate::spotify::PlaylistChange::Add {
+                uris,
+                position: None,
+            }
+        };
+        let result = crate::spotify::edit_playlist(&id, change).await;
+        let refreshed = self.playlist_changed(Some(&id)).await;
+        result?;
+        refreshed
     }
 }

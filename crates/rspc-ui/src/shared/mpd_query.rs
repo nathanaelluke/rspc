@@ -106,6 +106,7 @@ pub(crate) enum MpdQueryResult {
         path: Option<Path>,
     },
     SearchResult {
+        request_id: crate::shared::id::Id,
         data: Vec<Song>,
     },
     AddToPlaylist {

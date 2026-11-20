@@ -24,6 +24,9 @@ pub enum PlaylistChange {
         uris: Vec<String>,
         position: Option<usize>,
     },
+    Replace {
+        uris: Vec<String>,
+    },
     Remove {
         entries: Vec<(usize, String)>,
     },

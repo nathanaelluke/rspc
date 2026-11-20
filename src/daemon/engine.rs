@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -42,6 +42,64 @@ pub struct Player {
     request: Option<u64>,
     external: bool,
     loading: Option<Instant>,
+    shuffle: Option<Shuffle>,
+}
+#[derive(Default)]
+struct Shuffle {
+    played: HashSet<u32>,
+    remaining: Vec<u32>,
+    next_cycle: Vec<u32>,
+}
+impl Shuffle {
+    fn sync(&mut self, queue: &Queue, repeat: bool) {
+        use rand::seq::SliceRandom;
+
+        let live: HashSet<_> = queue.entries.iter().map(|entry| entry.id).collect();
+        self.played.retain(|id| live.contains(id));
+        if let Some(id) = queue.current {
+            self.played.insert(id);
+        }
+        self.remaining
+            .retain(|id| live.contains(id) && !self.played.contains(id));
+        let known: HashSet<_> = self.played.iter().chain(&self.remaining).copied().collect();
+        let mut added: Vec<_> = queue
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .filter(|id| !known.contains(id))
+            .collect();
+        added.shuffle(&mut rand::rng());
+        self.remaining.extend(added);
+        if repeat && self.remaining.is_empty() {
+            let eligible =
+                |id: &u32| live.contains(id) && (!queue.consume || Some(*id) != queue.current);
+            self.next_cycle.retain(eligible);
+            let scheduled: HashSet<_> = self.next_cycle.iter().copied().collect();
+            let mut added: Vec<_> = queue
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .filter(|id| eligible(id) && !scheduled.contains(id))
+                .collect();
+            added.shuffle(&mut rand::rng());
+            self.next_cycle.extend(added);
+        } else {
+            self.next_cycle.clear();
+        }
+    }
+    fn pending(&self) -> &[u32] {
+        if self.remaining.is_empty() {
+            &self.next_cycle
+        } else {
+            &self.remaining
+        }
+    }
+    fn advance_cycle(&mut self) {
+        if self.remaining.is_empty() {
+            self.played.clear();
+            self.remaining = std::mem::take(&mut self.next_cycle);
+        }
+    }
 }
 impl Player {
     pub fn playback(&self) -> Playback {
@@ -93,13 +151,14 @@ pub struct Engine {
 enum PlayTarget {
     Position(usize),
     Id(u32),
+    Shuffled(u32),
 }
 
 impl PlayTarget {
     fn index(&self, queue: &Queue) -> Result<usize> {
         match *self {
             Self::Position(index) => Ok(index),
-            Self::Id(id) => queue.index(id),
+            Self::Id(id) | Self::Shuffled(id) => queue.index(id),
         }
     }
 }
@@ -147,6 +206,7 @@ impl Engine {
                 request: None,
                 external: false,
                 loading: None,
+                shuffle: None,
             }),
             events,
             shutdown,
@@ -232,8 +292,19 @@ impl Engine {
         Ok(player)
     }
     pub async fn sync_pending(&self) {
-        let mut p = self.player.lock().await;
-        let mut ids = match p.queue.cursor().filter(|_| !p.stopped) {
+        let mut player = self.player.lock().await;
+        let p = &mut *player;
+        if p.random && !p.stopped && !p.external && p.queue.cursor().is_some() {
+            let shuffle = p.shuffle.get_or_insert_with(Shuffle::default);
+            shuffle.sync(&p.queue, p.repeat);
+            if p.single == 0 {
+                p.pending_ids = shuffle.pending().to_vec();
+                return;
+            }
+        } else {
+            p.shuffle = None;
+        }
+        let ids = match p.queue.cursor().filter(|_| !p.stopped) {
             None => Vec::new(),
             Some(index) if p.single != 0 => {
                 if p.repeat {
@@ -253,10 +324,6 @@ impl Engine {
                 ids
             }
         };
-        if p.random && ids.len() > 1 {
-            use rand::seq::SliceRandom;
-            ids.shuffle(&mut rand::rng());
-        }
         p.pending_ids = ids;
     }
     pub async fn prepare_audio(&self) -> Result<String> {
@@ -349,6 +416,13 @@ impl Engine {
         };
         {
             let mut p = self.player.lock().await;
+            if p.stopped || p.external {
+                p.shuffle = None;
+            } else if matches!(target, PlayTarget::Shuffled(_))
+                && let Some(shuffle) = &mut p.shuffle
+            {
+                shuffle.advance_cycle();
+            }
             p.queue.current = Some(entry.id);
             p.stopped = false;
             p.playing = self.catalog.demo;
@@ -593,20 +667,20 @@ impl Engine {
             let p = self.player.lock().await;
             let i = p.queue.cursor().unwrap_or(0);
             let next = if previous {
-                Some(i.saturating_sub(1))
-            } else if p.random && p.single == 0 && !p.pending_ids.is_empty() {
-                p.queue.index(p.pending_ids[0]).ok()
+                Some(PlayTarget::Position(i.saturating_sub(1)))
+            } else if p.random && p.single == 0 && !p.stopped {
+                p.pending_ids.first().copied().map(PlayTarget::Shuffled)
             } else if i + 1 < p.queue.entries.len() {
-                Some(i + 1)
+                Some(PlayTarget::Position(i + 1))
             } else if p.repeat && !p.queue.entries.is_empty() {
-                Some(0)
+                Some(PlayTarget::Position(0))
             } else {
                 None
             };
             (next, p.queue.current)
         };
-        if let Some(i) = next {
-            self.play_inner(PlayTarget::Position(i)).await?;
+        if let Some(target) = next {
+            self.play_inner(target).await?;
         } else {
             self.stop_inner().await;
         }

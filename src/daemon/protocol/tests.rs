@@ -72,6 +72,215 @@ async fn fixture() -> (tempfile::TempDir, Arc<Engine>) {
     (dir, engine)
 }
 
+async fn framing_client(
+    engine: Arc<Engine>,
+) -> (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+    tokio::task::JoinHandle<Result<()>>,
+) {
+    let (client, server) = UnixStream::pair().unwrap();
+    let task = tokio::spawn(serve(server, engine));
+    let (read, write) = client.into_split();
+    let mut read = BufReader::new(read);
+    let mut greeting = String::new();
+    read.read_line(&mut greeting).await.unwrap();
+    assert_eq!(greeting, "OK MPD 0.24.0\n");
+    (read, write, task)
+}
+
+async fn framing_reply(read: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> Vec<u8> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut reply = Vec::new();
+        loop {
+            let mut line = Vec::new();
+            assert_ne!(read.read_until(b'\n', &mut line).await.unwrap(), 0);
+            reply.extend_from_slice(&line);
+            if let Some(length) = line.strip_prefix(b"binary: ") {
+                let length: usize = std::str::from_utf8(length).unwrap().trim().parse().unwrap();
+                let start = reply.len();
+                reply.resize(start + length + 1, 0);
+                read.read_exact(&mut reply[start..]).await.unwrap();
+                assert_eq!(reply.last(), Some(&b'\n'));
+            }
+            if line == b"OK\n" || line.starts_with(b"ACK ") {
+                return reply;
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn binary_limits_are_per_client_and_preserve_artwork_offsets_and_framing() {
+    let (dir, mut engine) = fixture().await;
+    let socket = dir.path().join("artwork.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let catalog = Arc::get_mut(&mut Arc::get_mut(&mut engine).unwrap().catalog).unwrap();
+    Arc::get_mut(&mut catalog.local).unwrap().settings.address =
+        socket.to_string_lossy().into_owned();
+    let data: Vec<u8> = (0..20000).map(|i| i as u8).collect();
+    let artwork = data.clone();
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut read = BufReader::new(read);
+        write.write_all(b"OK MPD 0.24.0\n").await.unwrap();
+        loop {
+            let mut line = String::new();
+            if read.read_line(&mut line).await.unwrap() == 0 {
+                break;
+            }
+            let args = words(&line).unwrap();
+            assert!(matches!(args[0].as_str(), "albumart" | "readpicture"));
+            assert_eq!(args[1], "fixture.flac");
+            let offset: usize = args[2].parse().unwrap();
+            let chunk = &artwork[offset..];
+            write
+                .write_all(
+                    format!(
+                        "size: {}\ntype: image/png\nbinary: {}\n",
+                        artwork.len(),
+                        chunk.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            write.write_all(chunk).await.unwrap();
+            write.write_all(b"\nOK\n").await.unwrap();
+        }
+    });
+    let (mut read, mut write, task) = framing_client(Arc::clone(&engine)).await;
+    let (mut other_read, mut other_write, other_task) = framing_client(Arc::clone(&engine)).await;
+    write.write_all(b"binarylimit 1024\n").await.unwrap();
+    assert_eq!(framing_reply(&mut read).await, b"OK\n");
+    for command in ["albumart", "readpicture"] {
+        for (offset, length) in [(0, 1024), (1024, 1024), (19968, 32), (20000, 0)] {
+            write
+                .write_all(format!("{command} mpd:fixture.flac {offset}\nping\n").as_bytes())
+                .await
+                .unwrap();
+            let mut expected =
+                format!("size: 20000\ntype: image/png\nbinary: {length}\n").into_bytes();
+            expected.extend_from_slice(&data[offset..offset + length]);
+            expected.extend_from_slice(b"\nOK\n");
+            assert_eq!(framing_reply(&mut read).await, expected);
+            assert_eq!(framing_reply(&mut read).await, b"OK\n");
+        }
+    }
+    other_write
+        .write_all(b"albumart mpd:fixture.flac 0\n")
+        .await
+        .unwrap();
+    let mut expected = b"size: 20000\ntype: image/png\nbinary: 8192\n".to_vec();
+    expected.extend_from_slice(&data[..8192]);
+    expected.extend_from_slice(b"\nOK\n");
+    assert_eq!(framing_reply(&mut other_read).await, expected);
+    write.write_all(b"command_list_ok_begin\nbinarylimit 64\nalbumart mpd:fixture.flac 0\nping\ncommand_list_end\n").await.unwrap();
+    let mut expected = b"list_OK\nsize: 20000\ntype: image/png\nbinary: 64\n".to_vec();
+    expected.extend_from_slice(&data[..64]);
+    expected.extend_from_slice(b"\nlist_OK\nlist_OK\nOK\n");
+    assert_eq!(framing_reply(&mut read).await, expected);
+    write.write_all(b"close\n").await.unwrap();
+    other_write.write_all(b"close\n").await.unwrap();
+    task.await.unwrap().unwrap();
+    other_task.await.unwrap().unwrap();
+    drop(engine);
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn binary_limit_rejects_invalid_values_without_changing_the_client_limit() {
+    let (_dir, engine) = fixture().await;
+    let mut client = ClientState::new();
+    client
+        .execute(&engine, &words("binarylimit 1024").unwrap())
+        .await
+        .unwrap();
+    for command in [
+        "binarylimit",
+        "binarylimit 0",
+        "binarylimit 63",
+        "binarylimit -1",
+        "binarylimit 8400897",
+        "binarylimit 18446744073709551616",
+        "binarylimit nope",
+        "binarylimit 64 128",
+    ] {
+        let error = client
+            .execute(&engine, &words(command).unwrap())
+            .await
+            .unwrap_err();
+        assert!(failure("binarylimit", 0, &error).starts_with("ACK [2@0] {binarylimit}"));
+        assert_eq!(client.binary_limit, 1024);
+    }
+    for limit in [64, 5 * 1024 * 1024, 8_388_609, MAX_BINARY_LIMIT] {
+        client
+            .execute(&engine, &words(&format!("binarylimit {limit}")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(client.binary_limit, limit);
+    }
+    assert!(
+        execute(&engine, &words("binarylimit 1024").unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        execute(&engine, &words("binarylimit 63").unwrap())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn command_list_close_executes_preceding_commands_and_skips_following_commands() {
+    for (begin, expected) in [
+        ("command_list_begin", b"".as_slice()),
+        ("command_list_ok_begin", b"list_OK\n".as_slice()),
+    ] {
+        let (_dir, engine) = fixture().await;
+        execute(&engine, &words("repeat 1").unwrap()).await.unwrap();
+        execute(&engine, &words("random 1").unwrap()).await.unwrap();
+        let (mut read, mut write, task) = framing_client(Arc::clone(&engine)).await;
+        write
+            .write_all(format!("{begin}\nrepeat 0\nclose\nrandom 0\ncommand_list_end\n").as_bytes())
+            .await
+            .unwrap();
+        let mut reply = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read.read_to_end(&mut reply),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reply, expected);
+        task.await.unwrap().unwrap();
+        let player = engine.player.lock().await;
+        assert!(!player.repeat);
+        assert!(player.random);
+    }
+}
+
+#[tokio::test]
+async fn command_list_argument_failure_prevents_a_queued_close_and_keeps_the_stream_in_sync() {
+    let (_dir, engine) = fixture().await;
+    let (mut read, mut write, task) = framing_client(engine).await;
+    write
+        .write_all(b"command_list_ok_begin\nping\nplay 999999\nclose\ncommand_list_end\nping\n")
+        .await
+        .unwrap();
+    let reply = framing_reply(&mut read).await;
+    assert!(reply.starts_with(b"list_OK\nACK [2@1] {play} "));
+    assert_eq!(framing_reply(&mut read).await, b"OK\n");
+    write.write_all(b"close\n").await.unwrap();
+    task.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn liking_a_song_updates_the_library_without_disturbing_playback() {
     let (_dir, engine) = fixture().await;
@@ -494,7 +703,7 @@ async fn wire_errors_distinguish_unknown_commands_from_playback_failures() {
     for (command, expected) in [
         ("not_a_command", "ACK [5@0]"),
         ("playid 999999", "ACK [50@0]"),
-        ("play 999999", "ACK [52@0]"),
+        ("play 999999", "ACK [2@0]"),
         ("readpicture spotify:track:demo1 0", "ACK [50@0]"),
         ("albumart spotify:track:demo1 0", "ACK [50@0]"),
     ] {
@@ -515,7 +724,188 @@ async fn wire_errors_distinguish_unknown_commands_from_playback_failures() {
     assert_eq!(line, "list_OK\n");
     line.clear();
     read.read_line(&mut line).await.unwrap();
-    assert!(line.starts_with("ACK [52@1] {play}"), "{line}");
+    assert!(line.starts_with("ACK [2@1] {play}"), "{line}");
     write.write_all(b"close\n").await.unwrap();
     task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn playlist_load_honors_ranges_without_disturbing_existing_queue_entries() {
+    let (_dir, engine) = fixture().await;
+    let original: Vec<_> = engine
+        .player
+        .lock()
+        .await
+        .queue
+        .entries
+        .iter()
+        .map(|entry| entry.track.clone())
+        .collect();
+    for (selection, expected) in [
+        ("0:1", vec![0]),
+        ("1", vec![1]),
+        ("1:", vec![1, 2]),
+        ("1:99", vec![1, 2]),
+        ("3:", vec![]),
+        ("4:99", vec![]),
+        ("1:1", vec![]),
+    ] {
+        execute(&engine, &words("clear").unwrap()).await.unwrap();
+        execute(&engine, &words("add spotify:track:demo3").unwrap())
+            .await
+            .unwrap();
+        execute(
+            &engine,
+            &words(&format!("load \"Demo Mix\" {selection}")).unwrap(),
+        )
+        .await
+        .unwrap();
+        let entries = &engine.player.lock().await.queue.entries;
+        let actual: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.track.uri.clone())
+            .collect();
+        let expected: Vec<_> = std::iter::once(2)
+            .chain(expected)
+            .map(|index| original[index].uri.clone())
+            .collect();
+        assert_eq!(actual, expected, "load range {selection}");
+    }
+    let before = execute(&engine, &words("playlistinfo").unwrap())
+        .await
+        .unwrap();
+    for selection in ["2:1", "invalid", "0:invalid", "-1:"] {
+        assert!(
+            execute(
+                &engine,
+                &words(&format!("load \"Demo Mix\" {selection}")).unwrap()
+            )
+            .await
+            .is_err(),
+            "{selection}"
+        );
+        assert_eq!(
+            execute(&engine, &words("playlistinfo").unwrap())
+                .await
+                .unwrap(),
+            before
+        );
+    }
+}
+
+#[tokio::test]
+async fn playlist_save_supports_create_replace_and_append_modes() {
+    let (_dir, engine) = fixture().await;
+    execute(&engine, &words("save Copy").unwrap())
+        .await
+        .unwrap();
+    let original = engine.catalog.playlist_tracks("Copy").await.unwrap();
+    assert!(
+        execute(&engine, &words("save Copy").unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        execute(&engine, &words("save Copy create").unwrap())
+            .await
+            .is_err()
+    );
+    execute(&engine, &words("clear").unwrap()).await.unwrap();
+    execute(&engine, &words("add spotify:track:demo2").unwrap())
+        .await
+        .unwrap();
+    let queue = execute(&engine, &words("playlistinfo").unwrap())
+        .await
+        .unwrap();
+    let mut events = engine.events.subscribe();
+    events.borrow_and_update();
+    execute(&engine, &words("save Copy replace").unwrap())
+        .await
+        .unwrap();
+    assert!(events.borrow_and_update().contains_key("stored_playlist"));
+    assert_eq!(
+        engine.catalog.playlist_tracks("Copy").await.unwrap(),
+        vec![original[1].clone()]
+    );
+    execute(&engine, &words("save Copy append").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.catalog.playlist_tracks("Copy").await.unwrap(),
+        vec![original[1].clone(); 2]
+    );
+    assert_eq!(
+        execute(&engine, &words("playlistinfo").unwrap())
+            .await
+            .unwrap(),
+        queue
+    );
+    execute(&engine, &words("save Explicit create").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.catalog.playlist_tracks("Explicit").await.unwrap(),
+        vec![original[1].clone()]
+    );
+    execute(&engine, &words("clear").unwrap()).await.unwrap();
+    execute(&engine, &words("save Copy replace").unwrap())
+        .await
+        .unwrap();
+    assert!(
+        engine
+            .catalog
+            .playlist_tracks("Copy")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    execute(&engine, &words("save Copy append").unwrap())
+        .await
+        .unwrap();
+    assert!(
+        engine
+            .catalog
+            .playlist_tracks("Copy")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn playlist_save_rejects_invalid_modes_and_missing_targets_without_mutations() {
+    let (_dir, engine) = fixture().await;
+    let original = engine.catalog.playlist_tracks("Demo Mix").await.unwrap();
+    let queue = execute(&engine, &words("playlistinfo").unwrap())
+        .await
+        .unwrap();
+    let mut events = engine.events.subscribe();
+    events.borrow_and_update();
+    for command in [
+        "save \"Demo Mix\" invalid",
+        "save Missing invalid",
+        "save Missing replace",
+        "save Missing append",
+        "save \"Local Playlists/Missing\" invalid",
+    ] {
+        let error = execute(&engine, &words(command).unwrap())
+            .await
+            .unwrap_err();
+        if command.ends_with("invalid") {
+            assert!(error.to_string().contains("save mode"), "{error:#}");
+            assert!(failure("save", 0, &error).starts_with("ACK [2@0] {save}"));
+        }
+        assert_eq!(
+            engine.catalog.playlist_tracks("Demo Mix").await.unwrap(),
+            original
+        );
+        assert!(engine.catalog.playlist_tracks("Missing").await.is_err());
+        assert_eq!(
+            execute(&engine, &words("playlistinfo").unwrap())
+                .await
+                .unwrap(),
+            queue
+        );
+        assert!(!events.has_changed().unwrap());
+    }
 }

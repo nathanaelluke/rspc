@@ -19,6 +19,22 @@ fn stamped(uri: String, now: i64, public: Option<bool>) -> Item {
         ..Default::default()
     }
 }
+fn new_items(uris: Vec<String>, now: i64) -> Result<Vec<Item>> {
+    uris.into_iter()
+        .map(|uri| {
+            let parsed = librespot_core::SpotifyUri::from_uri(&uri)?;
+            ensure!(
+                matches!(
+                    parsed,
+                    librespot_core::SpotifyUri::Track { .. }
+                        | librespot_core::SpotifyUri::Episode { .. }
+                ),
+                "Only tracks and episodes can be added to Spotify playlists"
+            );
+            Ok(stamped(uri, now, None))
+        })
+        .collect()
+}
 fn insertion(items: Vec<Item>, at: Option<usize>) -> Result<wire::Op> {
     let add = wire::Add {
         items,
@@ -131,24 +147,23 @@ fn plan(rows: &[Item], length: usize, change: PlaylistChange, now: i64) -> Resul
                 position.is_none_or(|at| at <= length),
                 "Playlist destination is out of range"
             );
-            let mut items = Vec::new();
-            for uri in uris {
-                let parsed = librespot_core::SpotifyUri::from_uri(&uri)?;
-                ensure!(
-                    matches!(
-                        parsed,
-                        librespot_core::SpotifyUri::Track { .. }
-                            | librespot_core::SpotifyUri::Episode { .. }
-                    ),
-                    "Only tracks and episodes can be added to Spotify playlists"
-                );
-                items.push(stamped(uri, now, None));
-            }
+            let items = new_items(uris, now)?;
             if items.is_empty() {
                 Ok(Vec::new())
             } else {
                 Ok(vec![insertion(items, position)?])
             }
+        }
+        PlaylistChange::Replace { uris } => {
+            let items = new_items(uris, now)?;
+            let mut operations = Vec::new();
+            if !rows.is_empty() {
+                operations.push(deletion(0, rows.to_vec())?);
+            }
+            if !items.is_empty() {
+                operations.push(insertion(items, Some(0))?);
+            }
+            Ok(operations)
         }
         PlaylistChange::Remove { entries } => removals(&selected(rows, entries)?),
         PlaylistChange::Move { entries, to } => {
@@ -383,5 +398,124 @@ mod tests {
         assert_eq!(parsed.deltas[0].info.user(), "fixture-user");
         assert_eq!(parsed.deltas[0].ops[0].rem.length(), 6);
         assert!(parsed.want_sync_result());
+    }
+
+    fn uri(kind: &str, value: u8) -> String {
+        format!(
+            "spotify:{kind}:{}",
+            SpotifyId::from_raw(&[value; 16])
+                .unwrap()
+                .to_base62()
+                .unwrap()
+        )
+    }
+
+    #[test]
+    fn replacement_removes_old_rows_and_inserts_new_items_in_one_revision_checked_envelope() {
+        let original = rows();
+        let uris = vec![uri("track", 1), uri("episode", 2), uri("track", 1)];
+        let operations = plan(
+            &original,
+            original.len(),
+            PlaylistChange::Replace { uris: uris.clone() },
+            100,
+        )
+        .unwrap();
+        let change = envelope(&[1, 2, 3], operations, "fixture-user".into(), 100);
+        let parsed =
+            wire::ListChanges::parse_from_bytes(&change.write_to_bytes().unwrap()).unwrap();
+        assert_eq!(parsed.base_revision(), [1, 2, 3]);
+        assert_eq!(parsed.deltas.len(), 1);
+        assert_eq!(parsed.deltas[0].info.user(), "fixture-user");
+        assert!(parsed.want_sync_result());
+        let operations = &parsed.deltas[0].ops;
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0].kind(), Kind::REM);
+        assert_eq!(operations[0].rem.from_index(), 0);
+        assert_eq!(operations[0].rem.length(), original.len() as i32);
+        assert_eq!(operations[0].rem.items, original);
+        assert_eq!(operations[1].kind(), Kind::ADD);
+        assert_eq!(operations[1].add.from_index(), 0);
+        assert_eq!(
+            operations[1]
+                .add
+                .items
+                .iter()
+                .map(Item::uri)
+                .collect::<Vec<_>>(),
+            uris
+        );
+        assert!(
+            operations[1]
+                .add
+                .items
+                .iter()
+                .all(|item| item.attributes.timestamp() == 100)
+        );
+        let mut applied = original;
+        let removal = &operations[0].rem;
+        applied.drain(
+            removal.from_index() as usize..(removal.from_index() + removal.length()) as usize,
+        );
+        let addition = &operations[1].add;
+        let at = addition.from_index() as usize;
+        applied.splice(at..at, addition.items.clone());
+        assert_eq!(applied.iter().map(Item::uri).collect::<Vec<_>>(), uris);
+    }
+
+    #[test]
+    fn replacement_handles_empty_sources_and_destinations() {
+        let original = rows();
+        let cleared = plan(
+            &original,
+            original.len(),
+            PlaylistChange::Replace { uris: vec![] },
+            100,
+        )
+        .unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].kind(), Kind::REM);
+        assert_eq!(cleared[0].rem.items, original);
+        let track = uri("track", 1);
+        let inserted = plan(
+            &[],
+            0,
+            PlaylistChange::Replace {
+                uris: vec![track.clone()],
+            },
+            100,
+        )
+        .unwrap();
+        assert_eq!(inserted.len(), 1);
+        assert_eq!(inserted[0].kind(), Kind::ADD);
+        assert_eq!(inserted[0].add.from_index(), 0);
+        assert_eq!(inserted[0].add.items[0].uri(), track);
+        assert!(
+            plan(&[], 0, PlaylistChange::Replace { uris: vec![] }, 100)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn replacement_rejects_invalid_uris_before_producing_write_operations() {
+        let original = rows();
+        for invalid in [
+            "mpd:file.flac".into(),
+            "spotify:track:invalid".into(),
+            uri("album", 2),
+            uri("artist", 2),
+        ] {
+            let result = plan(
+                &original,
+                original.len(),
+                PlaylistChange::Replace {
+                    uris: vec![uri("track", 1), invalid.clone()],
+                },
+                100,
+            );
+            assert!(result.is_err(), "{invalid}");
+            assert_eq!(original, rows());
+        }
     }
 }

@@ -38,6 +38,40 @@ async fn random_library_pool_includes_likes_and_saved_albums_without_duplicate_u
 }
 
 #[test]
+fn matching_metadata_on_different_discs_keeps_both_recordings() {
+    let spotify = track_from_json(&json!({
+        "uri": "spotify:track:disc2intro",
+        "name": "Intro",
+        "album": {"name": "Concert"},
+        "artists": [{"name": "Artist"}],
+        "duration_ms": 60000,
+        "track_number": 1,
+        "disc_number": 2
+    }))
+    .expect("Spotify fixture");
+    let local = crate::daemon::local::tracks(b"file: Concert/Disc1/01.flac\nTitle: Intro\nAlbum: Concert\nArtist: Artist\nTrack: 1\nDisc: 1/2\nduration: 60\n");
+    assert_eq!(spotify.disc_number, 2);
+    assert_eq!(local[0].disc_number, 1);
+    assert_eq!(
+        prefer_local_tracks(vec![spotify.clone()], local.clone()).len(),
+        2
+    );
+    let same_disc = TrackInfo {
+        disc_number: 1,
+        ..spotify.clone()
+    };
+    assert_eq!(prefer_local_tracks(vec![same_disc], local.clone()), local);
+    let unknown_disc = TrackInfo {
+        disc_number: 0,
+        ..spotify
+    };
+    assert_eq!(
+        prefer_local_tracks(vec![unknown_disc], local.clone()),
+        local
+    );
+}
+
+#[test]
 fn merged_results_prefer_playable_local_copies_without_hiding_other_recordings() {
     let spotify = TrackInfo {
         uri: Some("spotify:track:fixture".into()),
@@ -1230,4 +1264,202 @@ async fn album_recency_uses_library_dates_and_never_playlist_dates() {
         tracks[0].added_at.unwrap().to_rfc3339(),
         "2026-01-02T00:00:00+00:00"
     );
+}
+
+#[tokio::test]
+async fn playlist_save_modes_preserve_validation_before_replacing_tracks() {
+    for demo in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut catalog = Catalog::new(demo);
+        catalog.disk_root = directory.path().join("catalog");
+        let catalog = Arc::new(catalog);
+        for mode in ["create", "replace", "append"] {
+            for uri in [None, Some("mpd:local.flac")] {
+                let track = TrackInfo {
+                    uri: uri.map(str::to_owned),
+                    ..TrackInfo::default()
+                };
+                assert!(
+                    catalog
+                        .playlist_save_with_mode("Demo Mix", vec![track], mode)
+                        .await
+                        .is_err()
+                );
+            }
+        }
+        if !demo {
+            assert!(
+                catalog
+                    .playlist_save_with_mode(
+                        "Demo Mix",
+                        vec![TrackInfo {
+                            uri: Some("spotify:track:not-a-valid-id".into()),
+                            ..TrackInfo::default()
+                        }],
+                        "replace"
+                    )
+                    .await
+                    .is_err()
+            );
+        } else {
+            assert_eq!(
+                catalog.playlist_tracks("Demo Mix").await.unwrap(),
+                demo_tracks()
+            );
+        }
+        let error = catalog
+            .playlist_save_with_mode("", vec![], "invalid")
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "invalid playlist save mode");
+    }
+    let catalog = Arc::new(Catalog::new(true));
+    for uri in [
+        "spotify:track:demo1",
+        "mpd:spotify:track:demo1",
+        "mpd:bad\npath",
+    ] {
+        let track = TrackInfo {
+            uri: Some(uri.into()),
+            ..TrackInfo::default()
+        };
+        for mode in ["create", "replace", "append"] {
+            assert!(
+                catalog
+                    .playlist_save_with_mode("Local Playlists/Copy", vec![track.clone()], mode)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn playlist_save_modes_require_existing_spotify_targets_without_a_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut catalog = Catalog::new(false);
+    catalog.disk_root = directory.path().join("catalog");
+    catalog.versions.get_mut().unwrap().clear();
+    cache_page(
+        &catalog,
+        "me/playlists",
+        0,
+        vec![json!({"id":"existing", "name":"Existing"})],
+        1,
+    );
+    let catalog = Arc::new(catalog);
+    assert_eq!(
+        catalog
+            .playlist_save("Existing", vec![])
+            .await
+            .unwrap_err()
+            .to_string(),
+        "playlist already exists"
+    );
+    for mode in ["replace", "append"] {
+        assert_eq!(
+            catalog
+                .playlist_save_with_mode("Missing", vec![], mode)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "playlist not found"
+        );
+    }
+}
+
+#[tokio::test]
+async fn playlist_save_modes_write_local_playlists_without_touching_the_mpd_queue() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
+
+    let directory = tempfile::tempdir().unwrap();
+    let address = directory.path().join("mpd.sock");
+    let listener = tokio::net::UnixListener::bind(&address).unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufStream::new(stream);
+        stream.write_all(b"OK MPD 0.24.0\n").await.unwrap();
+        stream.flush().await.unwrap();
+        for (expected, response) in [
+            ("listplaylists", "OK\n"),
+            ("playlistadd \"Copy\" \"first.flac\"", "OK\n"),
+            ("playlistadd \"Copy\" \"second.flac\"", "OK\n"),
+            ("listplaylists", "playlist: Copy\nOK\n"),
+            ("listplaylists", "playlist: Copy\nOK\n"),
+            ("playlistclear \"Copy\"", "OK\n"),
+            ("playlistadd \"Copy\" \"second.flac\"", "OK\n"),
+            ("listplaylists", "playlist: Copy\nOK\n"),
+            ("playlistadd \"Copy\" \"second.flac\"", "OK\n"),
+            ("listplaylists", "playlist: Copy\nOK\n"),
+            ("playlistclear \"Copy\"", "OK\n"),
+            ("listplaylists", "playlist: Copy\nOK\n"),
+            ("listplaylists", "OK\n"),
+            ("listplaylists", "OK\n"),
+        ] {
+            loop {
+                let mut command = String::new();
+                stream.read_line(&mut command).await.unwrap();
+                assert!(!command.is_empty(), "missing command: {expected}");
+                if command.trim_end() == "ping" {
+                    stream.write_all(b"OK\n").await.unwrap();
+                    stream.flush().await.unwrap();
+                    continue;
+                }
+                assert_eq!(command.trim_end(), expected);
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.flush().await.unwrap();
+                break;
+            }
+        }
+    });
+    let mut catalog = Catalog::new(true);
+    Arc::get_mut(&mut catalog.local).unwrap().settings.address =
+        address.to_string_lossy().into_owned();
+    let catalog = Arc::new(catalog);
+    let first = TrackInfo {
+        uri: Some("mpd:first.flac".into()),
+        ..TrackInfo::default()
+    };
+    let second = TrackInfo {
+        uri: Some("mpd:second.flac".into()),
+        ..TrackInfo::default()
+    };
+    let name = "Local Playlists/Copy";
+    let operations = async {
+        catalog
+            .playlist_save(name, vec![first, second.clone()])
+            .await
+            .unwrap();
+        assert!(catalog.playlist_save(name, vec![]).await.is_err());
+        catalog
+            .playlist_save_with_mode(name, vec![second.clone()], "replace")
+            .await
+            .unwrap();
+        catalog
+            .playlist_save_with_mode(name, vec![second], "append")
+            .await
+            .unwrap();
+        catalog
+            .playlist_save_with_mode(name, vec![], "replace")
+            .await
+            .unwrap();
+        catalog
+            .playlist_save_with_mode(name, vec![], "append")
+            .await
+            .unwrap();
+        for mode in ["replace", "append"] {
+            assert_eq!(
+                catalog
+                    .playlist_save_with_mode("Local Playlists/Missing", vec![], mode)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                "playlist not found"
+            );
+        }
+        server.await.unwrap();
+    };
+    tokio::time::timeout(Duration::from_secs(5), operations)
+        .await
+        .unwrap();
 }

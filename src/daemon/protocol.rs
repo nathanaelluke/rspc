@@ -32,11 +32,38 @@ impl std::fmt::Display for MissingArtwork {
 }
 impl std::error::Error for MissingArtwork {}
 
+#[derive(Debug)]
+struct InvalidArgument(&'static str);
+impl std::fmt::Display for InvalidArgument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for InvalidArgument {}
+
 fn failure(command: &str, index: usize, error: &anyhow::Error) -> String {
     let code = if error.is::<UnknownCommand>() {
         5
     } else if error.is::<super::queue::MissingQueueId>() || error.is::<MissingArtwork>() {
         50
+    } else if error.is::<InvalidArgument>()
+        || error.is::<std::num::ParseIntError>()
+        || error.is::<std::num::ParseFloatError>()
+        || error.chain().any(|cause| {
+            matches!(
+                cause.to_string().as_str(),
+                "missing command argument"
+                    | "queue position out of range"
+                    | "queue position is too large"
+                    | "queue index out of range"
+                    | "queue range out of bounds"
+                    | "invalid shuffle range"
+                    | "invalid playlist save mode"
+                    | "invalid playlist range"
+            )
+        })
+    {
+        2
     } else {
         52
     };
@@ -138,6 +165,66 @@ const COMMANDS: &[&str] = &[
 const MAX_COMMAND_BYTES: usize = 65_536;
 const MAX_COMMAND_LIST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_COMMAND_LIST_LENGTH: usize = 10_000;
+const DEFAULT_BINARY_LIMIT: usize = 8192;
+const MIN_BINARY_LIMIT: usize = 64;
+const MAX_BINARY_LIMIT: usize = 8_400_896;
+
+struct ClientState {
+    binary_limit: usize,
+}
+
+impl ClientState {
+    fn new() -> Self {
+        Self {
+            binary_limit: DEFAULT_BINARY_LIMIT,
+        }
+    }
+
+    async fn execute(&mut self, engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
+        if arg(args, 0)? == "binarylimit" {
+            if args.len() != 2 {
+                return Err(InvalidArgument("expected one binary limit").into());
+            }
+            let limit = args[1].parse::<usize>()?;
+            if !(MIN_BINARY_LIMIT..=MAX_BINARY_LIMIT).contains(&limit) {
+                return Err(InvalidArgument("binary limit out of range").into());
+            }
+            self.binary_limit = limit;
+            return Ok(Vec::new());
+        }
+        let reply = execute_command(engine, args).await?;
+        if matches!(args[0].as_str(), "albumart" | "readpicture") {
+            limit_binary_response(reply, self.binary_limit)
+        } else {
+            Ok(reply)
+        }
+    }
+}
+
+fn limit_binary_response(reply: Vec<u8>, limit: usize) -> Result<Vec<u8>> {
+    let mut start = 0;
+    while let Some(end) = reply[start..].iter().position(|&byte| byte == b'\n') {
+        let end = start + end;
+        if let Some(length) = reply[start..end].strip_prefix(b"binary: ") {
+            let length = std::str::from_utf8(length)?.parse::<usize>()?;
+            let data = &reply[end + 1..];
+            ensure!(
+                length.checked_add(1) == Some(data.len()) && data.last() == Some(&b'\n'),
+                "invalid binary response"
+            );
+            if length <= limit {
+                return Ok(reply);
+            }
+            let mut limited = reply[..start].to_vec();
+            limited.extend_from_slice(format!("binary: {limit}\n").as_bytes());
+            limited.extend_from_slice(&data[..limit]);
+            limited.push(b'\n');
+            return Ok(limited);
+        }
+        start = end + 1;
+    }
+    Ok(reply)
+}
 
 struct CommandList {
     separators: bool,
@@ -216,6 +303,9 @@ pub fn song(entry: &Entry, position: Option<usize>) -> String {
         t.duration_ms / 1000,
         t.duration_ms as f64 / 1000.0
     );
+    if t.disc_number > 0 {
+        s.push_str(&format!("Disc: {}\n", t.disc_number));
+    }
     for artist in &t.artists {
         s.push_str(&format!("Artist: {}\n", clean(artist)));
     }
@@ -278,10 +368,15 @@ async fn list_songs(engine: &Engine, tracks: Vec<crate::model::TrackInfo>) -> Ve
         .into_bytes()
 }
 
+#[cfg(test)]
 pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
+    ClientState::new().execute(engine, args).await
+}
+
+async fn execute_command(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
     let command = arg(args, 0)?;
     let text = match command {
-        "ping" | "password" | "binarylimit" | "noidle" => String::new(),
+        "ping" | "password" | "noidle" => String::new(),
         "rspc_library_add" | "rspc_library_remove" => {
             let (count, label) = if command == "rspc_library_add" {
                 (engine.catalog.add_liked(&args[1..]).await?, "added")
@@ -708,7 +803,14 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
                         .iter()
                         .map(|e| e.track.clone())
                         .collect();
-                    engine.catalog.playlist_save(name, tracks).await?;
+                    if let Some(mode) = args.get(2) {
+                        engine
+                            .catalog
+                            .playlist_save_with_mode(name, tracks, mode)
+                            .await?;
+                    } else {
+                        engine.catalog.playlist_save(name, tracks).await?;
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -717,12 +819,16 @@ pub async fn execute(engine: &Engine, args: &[String]) -> Result<Vec<u8>> {
         }
         "listplaylist" | "listplaylistinfo" | "load" => {
             let mut tracks = engine.catalog.playlist_tracks(arg(args, 1)?).await?;
-            if command == "listplaylistinfo"
+            if matches!(command, "listplaylistinfo" | "load")
                 && let Some(r) = args.get(2)
             {
-                let (a, b) = range(r, tracks.len())?;
-                ensure!(a <= b && b <= tracks.len(), "invalid playlist range");
-                tracks = tracks[a..b].to_vec();
+                let len = tracks.len();
+                let (a, b) = range(r, if command == "load" { usize::MAX } else { len })?;
+                ensure!(a <= b, "invalid playlist range");
+                if command == "listplaylistinfo" {
+                    ensure!(b <= len, "invalid playlist range");
+                }
+                tracks = tracks[a.min(len)..b.min(len)].to_vec();
             }
             if command == "load" {
                 engine
@@ -912,6 +1018,7 @@ pub async fn serve(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
     let mut read = BufReader::new(read);
     write.write_all(b"OK MPD 0.24.0\n").await?;
     let mut pending: Option<CommandList> = None;
+    let mut client = ClientState::new();
     let mut events = engine.events.subscribe();
     let mut seen = events.borrow_and_update().clone();
     // Shared with the idle wait so a cancelled read keeps any partial command.
@@ -934,7 +1041,7 @@ pub async fn serve(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
             }
         };
         let cmd = args[0].as_str();
-        if cmd == "close" {
+        if cmd == "close" && pending.is_none() {
             return Ok(());
         }
         // An event may have completed idle before its cancellation arrives.
@@ -964,7 +1071,10 @@ pub async fn serve(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
             } = pending.take().context("no active command list")?;
             let mut failed = false;
             for (i, args) in commands.iter().enumerate() {
-                match execute(&engine, args).await {
+                if args[0] == "close" {
+                    return Ok(());
+                }
+                match client.execute(&engine, args).await {
                     Ok(reply) => {
                         write.write_all(&reply).await?;
                         if separators {
@@ -1021,7 +1131,7 @@ pub async fn serve(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
             }
             continue;
         }
-        match execute(&engine, &args).await {
+        match client.execute(&engine, &args).await {
             Ok(reply) => {
                 write.write_all(&reply).await?;
                 write.write_all(b"OK\n").await?;

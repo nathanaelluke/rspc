@@ -1051,6 +1051,9 @@ fn prefer_local_tracks(spotify: Vec<TrackInfo>, local: Vec<TrackInfo>) -> Vec<Tr
                         && (track.track_number == 0
                             || other.track_number == 0
                             || track.track_number == other.track_number)
+                        && (track.disc_number == 0
+                            || other.disc_number == 0
+                            || track.disc_number == other.disc_number)
                 })
             });
         if let Some(index) = replacement {
@@ -1119,6 +1122,7 @@ pub fn track_from_json(v: &Value) -> Option<TrackInfo> {
         is_playable: v["is_playable"].as_bool().unwrap_or(true),
         is_local: false,
         track_number: v["track_number"].as_u64().unwrap_or(0) as u32,
+        disc_number: v["disc_number"].as_u64().unwrap_or(0) as u32,
         explicit: v["explicit"].as_bool().unwrap_or(false),
     })
 }

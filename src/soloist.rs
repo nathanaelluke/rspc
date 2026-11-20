@@ -324,6 +324,7 @@ fn track_from_entity(entity: &Value) -> Option<TrackInfo> {
         is_playable: true,
         is_local: false,
         track_number: 0,
+        disc_number: 0,
         explicit: d["playback"]["content_ratings"]
             .as_array()
             .is_some_and(|ratings| ratings.iter().any(|r| r == "explicit")),

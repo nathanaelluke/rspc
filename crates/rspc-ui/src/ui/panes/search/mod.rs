@@ -63,6 +63,7 @@ pub struct SearchPane {
     phase: Phase,
     songs_dir: Dir<Song, ListState>,
     column_areas: EnumMap<BrowserArea, Rect>,
+    pending_search: Option<crate::shared::id::Id>,
 }
 
 const SEARCH: &str = "search";
@@ -91,6 +92,7 @@ impl SearchPane {
             songs_dir: Dir::default(),
             inputs,
             column_areas: EnumMap::default(),
+            pending_search: None,
         }
     }
 
@@ -207,6 +209,8 @@ impl SearchPane {
     }
 
     fn search(&mut self, ctx: &Ctx) {
+        self.pending_search = None;
+        let request_id = crate::shared::id::new();
         let search_mode = self.inputs.search_mode();
         let filter = if let Some(custom_query) = self.inputs.custom_query(ctx)
             && !custom_query.is_empty()
@@ -256,6 +260,7 @@ impl SearchPane {
             && stickers_supported
             && (rating_filter.is_some() || liked_filter.is_some())
         {
+            self.pending_search = Some(request_id);
             // Filters are empty, but rating filters are set - show all songs with the
             // wanted rating
             ctx.query()
@@ -306,7 +311,7 @@ impl SearchPane {
                     client.send_execute_cmd_list()?;
                     let data: Vec<Song> = client.read_response()?;
 
-                    Ok(MpdQueryResult::SearchResult { data })
+                    Ok(MpdQueryResult::SearchResult { request_id, data })
                 });
         } else if filter.is_empty() {
             // Filters are empty, stickers are either not supported or not set - clear
@@ -314,6 +319,7 @@ impl SearchPane {
             let _ = std::mem::take(&mut self.songs_dir);
         } else {
             // Search normally
+            self.pending_search = Some(request_id);
             ctx.query()
                 .id(SEARCH)
                 .replace_id(SEARCH)
@@ -347,7 +353,7 @@ impl SearchPane {
                         data
                     };
 
-                    Ok(MpdQueryResult::SearchResult { data })
+                    Ok(MpdQueryResult::SearchResult { request_id, data })
                 });
         }
     }
@@ -424,6 +430,12 @@ impl SearchPane {
                 CommonAction::Rename => {}
                 CommonAction::Close => {}
                 CommonAction::Confirm => {
+                    if matches!(
+                        self.inputs.focused(),
+                        InputType::Spinner(_) | InputType::Button(_)
+                    ) {
+                        self.pending_search = None;
+                    }
                     match self.inputs.activate_focused(ctx) {
                         ActionResult::Search => {
                             self.search(ctx);
@@ -467,6 +479,7 @@ impl SearchPane {
                     kind: AddKind::Action(_),
                 } => {}
                 CommonAction::Delete => {
+                    self.pending_search = None;
                     self.inputs.reset_focused(ctx);
                     self.songs_dir = Dir::default();
                     ctx.render()?;
@@ -1180,6 +1193,7 @@ impl Pane for SearchPane {
     fn on_event(&mut self, event: &mut UiEvent, _is_visible: bool, ctx: &Ctx) -> Result<()> {
         match event {
             UiEvent::Database => {
+                self.pending_search = None;
                 self.songs_dir = Dir::default();
                 self.phase = Phase::Search;
 
@@ -1190,6 +1204,7 @@ impl Pane for SearchPane {
                 }
             }
             UiEvent::Reconnected => {
+                self.pending_search = None;
                 self.phase = Phase::Search;
                 self.songs_dir = Dir::default();
             }
@@ -1209,7 +1224,10 @@ impl Pane for SearchPane {
         ctx: &Ctx,
     ) -> Result<()> {
         match (id, data) {
-            (SEARCH, MpdQueryResult::SearchResult { data }) => {
+            (SEARCH, MpdQueryResult::SearchResult { request_id, data })
+                if self.pending_search == Some(request_id) =>
+            {
+                self.pending_search = None;
                 status_info!("Found {} matching songs", data.len());
                 self.songs_dir = Dir::new(data);
                 ctx.render()?;
@@ -1300,6 +1318,12 @@ impl Pane for SearchPane {
             MouseEventKind::DoubleClick => match self.phase {
                 Phase::Search => {
                     if self.column_areas[BrowserArea::Current].contains(event.into()) {
+                        if matches!(
+                            self.inputs.focused(),
+                            InputType::Spinner(_) | InputType::Button(_)
+                        ) {
+                            self.pending_search = None;
+                        }
                         match self.inputs.activate_focused(ctx) {
                             ActionResult::Search => {
                                 self.search(ctx);
@@ -1408,8 +1432,9 @@ impl Pane for SearchPane {
     fn handle_insert_mode(&mut self, kind: InputResultEvent, ctx: &mut Ctx) -> Result<()> {
         match self.phase {
             Phase::Search => match kind {
-                InputResultEvent::Push => {}
-                InputResultEvent::Pop => {}
+                InputResultEvent::Push | InputResultEvent::Pop => {
+                    self.pending_search = None;
+                }
                 InputResultEvent::Confirm => {
                     self.maybe_search_on_change(ctx);
                 }
@@ -1470,6 +1495,137 @@ mod tests {
     use crossbeam::channel::{Receiver, Sender};
     use rstest::rstest;
     use std::sync::Arc;
+
+    #[rstest]
+    fn stale_result_after_clearing_search(mut ctx: Ctx) {
+        let mut pane = SearchPane::new(&ctx);
+        let InputType::Textbox(input) = &pane.inputs.inputs[0] else {
+            panic!("expected textbox")
+        };
+        let buffer = input.buffer_id;
+        ctx.input.set_buffer("needle".into(), buffer);
+        pane.search(&ctx);
+        let request_id = pane.pending_search.expect("pending search");
+        ctx.input.clear_buffer(buffer);
+        pane.handle_insert_mode(InputResultEvent::Pop, &mut ctx)
+            .expect("search fixture operation");
+        pane.search(&ctx);
+        pane.on_query_finished(
+            SEARCH,
+            MpdQueryResult::SearchResult {
+                request_id,
+                data: vec![Song {
+                    file: "needle.flac".into(),
+                    ..Song::default()
+                }],
+            },
+            true,
+            &ctx,
+        )
+        .expect("search fixture operation");
+        assert!(
+            pane.songs_dir.items.is_empty(),
+            "cleared search must stay empty"
+        );
+    }
+
+    fn search_input(pane: &SearchPane) -> crate::ui::input::BufferId {
+        let InputType::Textbox(input) = &pane.inputs.inputs[0] else {
+            panic!("expected textbox")
+        };
+        input.buffer_id
+    }
+
+    fn finish_search(
+        pane: &mut SearchPane,
+        ctx: &Ctx,
+        request_id: crate::shared::id::Id,
+        name: &str,
+    ) {
+        pane.on_query_finished(
+            SEARCH,
+            MpdQueryResult::SearchResult {
+                request_id,
+                data: vec![Song {
+                    file: name.into(),
+                    ..Song::default()
+                }],
+            },
+            true,
+            ctx,
+        )
+        .expect("search fixture operation");
+    }
+
+    #[rstest]
+    fn search_results_follow_latest_request(ctx: Ctx) {
+        let mut pane = SearchPane::new(&ctx);
+        let buffer = search_input(&pane);
+        ctx.input.set_buffer("old".into(), buffer);
+        pane.search(&ctx);
+        let old = pane.pending_search.expect("pending search");
+        ctx.input.set_buffer("new".into(), buffer);
+        pane.search(&ctx);
+        let new = pane.pending_search.expect("pending search");
+        finish_search(&mut pane, &ctx, new, "new.flac");
+        finish_search(&mut pane, &ctx, old, "old.flac");
+        assert_eq!(pane.songs_dir.items[0].file, "new.flac");
+    }
+
+    #[rstest]
+    fn editing_before_submitting_invalidates_pending_search(mut ctx: Ctx) {
+        let mut pane = SearchPane::new(&ctx);
+        let buffer = search_input(&pane);
+        ctx.input.set_buffer("old".into(), buffer);
+        pane.search(&ctx);
+        let old = pane.pending_search.expect("pending search");
+        ctx.input.set_buffer("new".into(), buffer);
+        pane.handle_insert_mode(InputResultEvent::Push, &mut ctx)
+            .expect("search fixture operation");
+        finish_search(&mut pane, &ctx, old, "old.flac");
+        assert_eq!(pane.songs_dir.items, [] as [Song; 0]);
+        pane.search(&ctx);
+        let new = pane.pending_search.expect("pending search");
+        finish_search(&mut pane, &ctx, new, "new.flac");
+        assert_eq!(pane.songs_dir.items[0].file, "new.flac");
+    }
+
+    #[rstest]
+    #[case(UiEvent::Reconnected)]
+    #[case(UiEvent::Database)]
+    #[case(UiEvent::ConfigChanged)]
+    fn search_event_invalidates_old_result(#[case] mut event: UiEvent, ctx: Ctx) {
+        let mut pane = SearchPane::new(&ctx);
+        let buffer = search_input(&pane);
+        ctx.input.set_buffer("old".into(), buffer);
+        pane.search(&ctx);
+        let old = pane.pending_search.expect("pending search");
+        pane.on_event(&mut event, true, &ctx)
+            .expect("search fixture operation");
+        let buffer = search_input(&pane);
+        ctx.input.set_buffer("new".into(), buffer);
+        pane.search(&ctx);
+        let new = pane.pending_search.expect("pending search");
+        finish_search(&mut pane, &ctx, old, "old.flac");
+        assert_eq!(pane.songs_dir.items, [] as [Song; 0]);
+        finish_search(&mut pane, &ctx, new, "new.flac");
+        assert_eq!(pane.songs_dir.items[0].file, "new.flac");
+    }
+
+    #[rstest]
+    fn sticker_only_search_still_accepts_results(mut ctx: Ctx) {
+        ctx.stickers_supported = crate::ctx::StickersSupport::Supported;
+        let mut pane = SearchPane::new(&ctx);
+        while !matches!(pane.inputs.focused(), InputType::Spinner(input) if input.key == inputs::LIKE_KEY)
+        {
+            pane.inputs.next_non_wrapping();
+        }
+        pane.inputs.activate_focused(&ctx);
+        pane.search(&ctx);
+        let request_id = pane.pending_search.expect("sticker-only search queued");
+        finish_search(&mut pane, &ctx, request_id, "liked.flac");
+        assert_eq!(pane.songs_dir.items[0].file, "liked.flac");
+    }
 
     #[rstest]
     #[case(false, false)]

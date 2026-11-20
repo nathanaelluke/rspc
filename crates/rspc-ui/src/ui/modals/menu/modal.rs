@@ -207,15 +207,23 @@ impl Modal for MenuModal<'_> {
                     ctx.render()?;
                 }
                 CommonAction::Top => {
-                    if self.current_section_idx != 0 {
+                    let Some(index) = self.sections.iter().position(|section| section.len() > 0)
+                    else {
+                        return Ok(());
+                    };
+                    if self.current_section_idx != index {
                         self.sections[self.current_section_idx].unselect(ctx);
                     }
-                    self.current_section_idx = 0;
-                    self.sections[0].select(0);
+                    self.current_section_idx = index;
+                    self.sections[index].select(0);
                     ctx.render()?;
                 }
                 CommonAction::Bottom => {
-                    let sect_idx = self.sections.len() - 1;
+                    let Some(sect_idx) =
+                        self.sections.iter().rposition(|section| section.len() > 0)
+                    else {
+                        return Ok(());
+                    };
                     let last_sect_item_idx = self.sections[sect_idx].len() - 1;
 
                     if self.current_section_idx != sect_idx {
@@ -567,19 +575,31 @@ impl<'a> MenuModal<'a> {
     }
 
     fn next(&mut self) {
-        let result = self.sections[self.current_section_idx].down();
-        if !result {
+        if self.sections.is_empty() {
+            return;
+        }
+        for _ in 0..=self.sections.len() {
+            if self.sections[self.current_section_idx].len() > 0
+                && self.sections[self.current_section_idx].down()
+            {
+                return;
+            }
             self.current_section_idx = (self.current_section_idx + 1) % self.sections.len();
-            self.sections[self.current_section_idx].down();
         }
     }
 
     fn prev(&mut self) {
-        let result = self.sections[self.current_section_idx].up();
-        if !result {
+        if self.sections.is_empty() {
+            return;
+        }
+        for _ in 0..=self.sections.len() {
+            if self.sections[self.current_section_idx].len() > 0
+                && self.sections[self.current_section_idx].up()
+            {
+                return;
+            }
             self.current_section_idx =
                 (self.current_section_idx + self.sections.len() - 1) % self.sections.len();
-            self.sections[self.current_section_idx].up();
         }
     }
 
@@ -597,6 +617,44 @@ mod tests {
     use super::*;
     use crate::tests::fixtures::ctx;
     use rstest::rstest;
+
+    #[rstest]
+    fn empty_playlist_sections_do_not_trap_keyboard_navigation(mut ctx: Ctx) {
+        use std::sync::Arc;
+
+        let mut modal = MenuModal::new(&ctx)
+            .input_section(&ctx, "New playlist", |section| Some(section))
+            .select_section(&ctx, Some)
+            .list_section(&ctx, |section| Some(section.item("Cancel", |_| Ok(()))))
+            .build();
+        let mut down = ActionEvent::from(Arc::new(vec![CommonAction::Down.into()]));
+        modal
+            .handle_key(&mut down, &mut ctx)
+            .expect("navigate down");
+        assert_eq!(modal.current_section_idx, 2);
+        let mut up = ActionEvent::from(Arc::new(vec![CommonAction::Up.into()]));
+        modal.handle_key(&mut up, &mut ctx).expect("navigate up");
+        assert_eq!(modal.current_section_idx, 0);
+    }
+
+    #[rstest]
+    fn menu_end_navigation_skips_empty_sections(mut ctx: Ctx) {
+        use std::sync::Arc;
+
+        let mut modal = MenuModal::new(&ctx)
+            .select_section(&ctx, Some)
+            .list_section(&ctx, |section| Some(section.item("Cancel", |_| Ok(()))))
+            .select_section(&ctx, Some)
+            .build();
+        for action in [CommonAction::Bottom, CommonAction::Top] {
+            let mut event = ActionEvent::from(Arc::new(vec![action.into()]));
+            modal
+                .handle_key(&mut event, &mut ctx)
+                .expect("navigate menu");
+            assert_eq!(modal.current_section_idx, 1);
+            assert_eq!(modal.sections[1].selected(), Some(0));
+        }
+    }
 
     #[rstest]
     fn mixed_case_search_finds_and_cycles_matches_across_sections(mut ctx: Ctx) {

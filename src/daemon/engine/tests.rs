@@ -513,3 +513,251 @@ async fn unpaired_play_keeps_queue_and_publishes_login_instructions() {
     assert_eq!(engine.player.lock().await.queue.current, None);
     server.await.unwrap();
 }
+
+async fn shuffle_option(engine: &Engine, name: &str, value: &str) {
+    super::super::protocol::execute(engine, &[name.into(), value.into()])
+        .await
+        .unwrap();
+}
+
+async fn shuffle_pending(engine: &Engine) -> Vec<u32> {
+    engine.player.lock().await.pending_ids.clone()
+}
+
+fn shuffle_ids(ids: &[u32]) -> std::collections::HashSet<u32> {
+    ids.iter().copied().collect()
+}
+
+#[tokio::test]
+async fn shuffle_finishes_every_entry_before_stopping() {
+    for natural in [false, true] {
+        let (_dir, engine) = fixture().await;
+        shuffle_option(&engine, "random", "1").await;
+        engine.play_id(1).await.unwrap();
+        engine.player.lock().await.pending_ids = vec![3, 2];
+        engine.next(false).await.unwrap();
+        assert_eq!(engine.playback().await.entry.unwrap().id, 3);
+        for _ in 0..3 {
+            engine.sync_pending().await;
+            assert_eq!(shuffle_pending(&engine).await, [2]);
+        }
+        if natural {
+            engine.finished().await.unwrap();
+        } else {
+            engine.next(false).await.unwrap();
+        }
+        assert_eq!(engine.playback().await.entry.unwrap().id, 2);
+        assert!(shuffle_pending(&engine).await.is_empty());
+        if natural {
+            engine.finished().await.unwrap();
+        } else {
+            engine.next(false).await.unwrap();
+        }
+        assert!(engine.playback().await.stopped);
+        assert_eq!(engine.player.lock().await.queue.entries.len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn shuffle_repeat_starts_a_full_cycle_after_exhaustion() {
+    let (_dir, engine) = fixture().await;
+    shuffle_option(&engine, "random", "1").await;
+    shuffle_option(&engine, "repeat", "1").await;
+    engine.play_id(1).await.unwrap();
+    engine.player.lock().await.pending_ids = vec![3, 2];
+    engine.finished().await.unwrap();
+    assert_eq!(shuffle_pending(&engine).await, [2]);
+    engine.finished().await.unwrap();
+    assert_eq!(engine.playback().await.entry.unwrap().id, 2);
+    let preview = shuffle_pending(&engine).await;
+    assert_eq!(preview.len(), 3);
+    assert_eq!(shuffle_ids(&preview), shuffle_ids(&[1, 2, 3]));
+    engine.sync_pending().await;
+    assert_eq!(shuffle_pending(&engine).await, preview);
+    for expected in preview {
+        engine.finished().await.unwrap();
+        assert_eq!(engine.playback().await.entry.unwrap().id, expected);
+    }
+    assert_eq!(shuffle_pending(&engine).await.len(), 3);
+    shuffle_option(&engine, "repeat", "0").await;
+    assert!(shuffle_pending(&engine).await.is_empty());
+    engine.finished().await.unwrap();
+    assert!(engine.playback().await.stopped);
+}
+
+#[tokio::test]
+async fn shuffle_queue_edits_preserve_order_and_add_new_ids() {
+    let (_dir, engine) = fixture().await;
+    shuffle_option(&engine, "random", "1").await;
+    engine.play_id(1).await.unwrap();
+    engine.play_id(3).await.unwrap();
+    let track = engine.playback().await.entry.unwrap().track;
+    let added = engine
+        .edit_queue(|queue| queue.add(vec![track.clone(), track], 0))
+        .await
+        .unwrap();
+    let pending = shuffle_pending(&engine).await;
+    assert_eq!(pending[0], 2);
+    assert_eq!(shuffle_ids(&pending[1..]), shuffle_ids(&added));
+    engine
+        .edit_queue(|queue| queue.move_range(0, 2, 3))
+        .await
+        .unwrap();
+    assert_eq!(shuffle_pending(&engine).await, pending);
+    engine
+        .edit_queue(|queue| {
+            for id in [1, 2] {
+                let index = queue.index(id)?;
+                queue.delete(index, index + 1)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(shuffle_pending(&engine).await, pending[1..]);
+    for expected in &pending[1..] {
+        engine.queue_changed().await;
+        engine.finished().await.unwrap();
+        assert_eq!(engine.playback().await.entry.unwrap().id, *expected);
+    }
+    engine.finished().await.unwrap();
+    assert!(engine.playback().await.stopped);
+}
+
+#[tokio::test]
+async fn shuffle_deleting_current_preserves_unplayed_ids_when_paused_or_playing() {
+    for paused in [false, true] {
+        let (_dir, engine) = fixture().await;
+        let track = engine.player.lock().await.queue.entries[0].track.clone();
+        engine
+            .edit_queue(|queue| queue.add(vec![track], 3))
+            .await
+            .unwrap();
+        shuffle_option(&engine, "random", "1").await;
+        engine.play_id(1).await.unwrap();
+        engine.play_id(3).await.unwrap();
+        if paused {
+            engine.pause(Some(true)).await.unwrap();
+        }
+        engine.edit_queue(|queue| queue.delete(2, 3)).await.unwrap();
+        assert_eq!(engine.playback().await.entry.unwrap().id, 4);
+        assert_eq!(engine.playback().await.playing, !paused);
+        assert_eq!(shuffle_pending(&engine).await, [2]);
+        if paused {
+            engine.pause(Some(false)).await.unwrap();
+            assert_eq!(shuffle_pending(&engine).await, [2]);
+        }
+        engine.finished().await.unwrap();
+        assert_eq!(engine.playback().await.entry.unwrap().id, 2);
+        engine.finished().await.unwrap();
+        assert!(engine.playback().await.stopped);
+    }
+}
+
+#[tokio::test]
+async fn shuffle_explicit_selections_and_seeks_preserve_other_unplayed_ids() {
+    let (_dir, engine) = fixture().await;
+    shuffle_option(&engine, "random", "1").await;
+    engine.play(2).await.unwrap();
+    assert_eq!(
+        shuffle_ids(&shuffle_pending(&engine).await),
+        shuffle_ids(&[1, 2])
+    );
+    engine.play_id(1).await.unwrap();
+    assert_eq!(shuffle_pending(&engine).await, [2]);
+    engine.play_id(3).await.unwrap();
+    assert_eq!(shuffle_pending(&engine).await, [2]);
+    engine.seek_id(2, 12.0).await.unwrap();
+    assert!(shuffle_pending(&engine).await.is_empty());
+    engine.seek_position(1, 15.0).await.unwrap();
+    engine.pause(Some(true)).await.unwrap();
+    engine.pause(Some(false)).await.unwrap();
+    assert!(shuffle_pending(&engine).await.is_empty());
+    engine.next(false).await.unwrap();
+    assert!(engine.playback().await.stopped);
+}
+
+#[tokio::test]
+async fn shuffle_mode_changes_reset_only_when_random_is_disabled_or_playback_stops() {
+    let (_dir, engine) = fixture().await;
+    shuffle_option(&engine, "random", "1").await;
+    engine.play_id(1).await.unwrap();
+    engine.play_id(3).await.unwrap();
+    for (name, value) in [
+        ("repeat", "1"),
+        ("consume", "1"),
+        ("consume", "0"),
+        ("random", "1"),
+    ] {
+        shuffle_option(&engine, name, value).await;
+        assert_eq!(shuffle_pending(&engine).await, [2]);
+    }
+    shuffle_option(&engine, "single", "1").await;
+    assert_eq!(shuffle_pending(&engine).await, [3]);
+    engine.finished().await.unwrap();
+    assert_eq!(engine.playback().await.entry.unwrap().id, 3);
+    shuffle_option(&engine, "single", "0").await;
+    assert_eq!(shuffle_pending(&engine).await, [2]);
+    shuffle_option(&engine, "repeat", "0").await;
+    shuffle_option(&engine, "random", "0").await;
+    assert!(shuffle_pending(&engine).await.is_empty());
+    shuffle_option(&engine, "random", "1").await;
+    assert_eq!(
+        shuffle_ids(&shuffle_pending(&engine).await),
+        shuffle_ids(&[1, 2])
+    );
+    engine.play_id(1).await.unwrap();
+    shuffle_option(&engine, "random", "0").await;
+    assert_eq!(shuffle_pending(&engine).await, [2, 3]);
+    engine.next(false).await.unwrap();
+    assert_eq!(engine.playback().await.entry.unwrap().id, 2);
+    shuffle_option(&engine, "random", "1").await;
+    engine.stop().await;
+    assert!(shuffle_pending(&engine).await.is_empty());
+    engine.pause(Some(false)).await.unwrap();
+    assert_eq!(
+        shuffle_ids(&shuffle_pending(&engine).await),
+        shuffle_ids(&[1, 3])
+    );
+}
+
+#[tokio::test]
+async fn shuffle_consume_and_oneshot_do_not_reintroduce_finished_ids() {
+    for repeat in [false, true] {
+        for consume in ["1", "oneshot"] {
+            let (_dir, engine) = fixture().await;
+            shuffle_option(&engine, "random", "1").await;
+            shuffle_option(&engine, "repeat", if repeat { "1" } else { "0" }).await;
+            shuffle_option(&engine, "consume", consume).await;
+            engine.play_id(1).await.unwrap();
+            engine.player.lock().await.pending_ids = vec![3, 2];
+            engine.next(false).await.unwrap();
+            assert_eq!(shuffle_pending(&engine).await, [2]);
+            {
+                let p = engine.player.lock().await;
+                assert!(p.queue.index(1).is_err());
+                assert_eq!(p.queue.consume, consume == "1");
+                assert!(!p.queue.consume_oneshot);
+            }
+            engine.finished().await.unwrap();
+            assert_eq!(engine.playback().await.entry.unwrap().id, 2);
+            if repeat && consume == "oneshot" {
+                let preview = shuffle_pending(&engine).await;
+                assert_eq!(preview.len(), 2);
+                assert_eq!(shuffle_ids(&preview), shuffle_ids(&[2, 3]));
+                for expected in preview {
+                    engine.finished().await.unwrap();
+                    assert_eq!(engine.playback().await.entry.unwrap().id, expected);
+                }
+            } else {
+                assert!(shuffle_pending(&engine).await.is_empty());
+                engine.finished().await.unwrap();
+                assert!(engine.playback().await.stopped);
+                assert_eq!(
+                    engine.player.lock().await.queue.entries.len(),
+                    if consume == "1" { 0 } else { 2 }
+                );
+            }
+        }
+    }
+}

@@ -335,6 +335,10 @@ pub fn tracks(bytes: &[u8]) -> Vec<TrackInfo> {
                     .and_then(|s| s.split('/').next())
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0),
+                disc_number: get("Disc")
+                    .and_then(|s| s.split('/').next())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
                 explicit: false,
                 image_url: None,
                 release_date: get("Date").map(str::to_owned),
@@ -828,10 +832,6 @@ impl Player {
         } else {
             Some(volume)
         };
-        self.generation.store(request, Ordering::Relaxed);
-        p.current = Some(format!("mpd:{file}"));
-        p.observed = false;
-        p.ended = false;
         self.claim(p).await?;
         for command in [
             "stop".to_string(),
@@ -867,6 +867,10 @@ impl Player {
         if let Some(volume) = deferred_volume {
             p.wire.volume(volume, true).await?;
         }
+        self.generation.store(request, Ordering::Relaxed);
+        p.current = Some(format!("mpd:{file}"));
+        p.observed = false;
+        p.ended = false;
         Ok(())
     }
     async fn observe(&self) -> Result<()> {

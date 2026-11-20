@@ -45,6 +45,7 @@ pub struct TrackInfo {
     pub release_date: Option<String>,
     pub added_at: Option<chrono::DateTime<chrono::Utc>>,
     pub track_number: u32,
+    pub disc_number: u32,
     pub image_url: Option<String>,
     pub explicit: bool,
     pub is_local: bool,
@@ -75,6 +76,7 @@ impl Default for TrackInfo {
             release_date: None,
             added_at: None,
             track_number: 0,
+            disc_number: 0,
             image_url: None,
             explicit: false,
             is_local: false,
@@ -90,6 +92,7 @@ mod tests {
         let track: super::TrackInfo = serde_json::from_str(old).unwrap();
         assert!(track.is_playable);
         assert!(track.artist_refs.is_empty());
+        assert_eq!(track.disc_number, 0);
         let encoded = serde_json::to_value(&track).unwrap();
         let decoded: super::TrackInfo = serde_json::from_value(encoded).unwrap();
         assert_eq!(track, decoded);

@@ -310,16 +310,24 @@ impl<T: ScrollingState> DirState<T> {
         let Some(viewport_len) = self.viewport_len else {
             return;
         };
+        if viewport_len == 0 {
+            return;
+        }
+        let scrolloff = scrolloff.min((viewport_len - 1) / 2);
 
         let offset = self.offset();
         let Some(selected) = self.get_selected() else {
             return;
         };
 
-        if selected > (offset + viewport_len).saturating_sub(scrolloff + 1) {
-            self.select(Some(offset + viewport_len - scrolloff - 1), scrolloff);
-        } else if selected < offset + scrolloff {
-            self.select(Some(offset + scrolloff), scrolloff);
+        let first = offset.saturating_add(scrolloff);
+        let last = offset
+            .saturating_add(viewport_len)
+            .saturating_sub(scrolloff + 1);
+        if selected > last {
+            self.select(Some(last), scrolloff);
+        } else if selected < first {
+            self.select(Some(first), scrolloff);
         }
     }
 
@@ -509,6 +517,27 @@ mod tests {
     use ratatui::widgets::ListState;
 
     use super::DirState;
+
+    #[test]
+    fn scrolling_short_viewports_keeps_the_cursor_in_bounds() {
+        for viewport in 0..=3 {
+            for scrolloff in [0, 1, 3, 5, usize::MAX] {
+                let mut state = DirState::<ListState>::default();
+                state.set_content_and_viewport_len(20, viewport);
+                state.select(Some(5), scrolloff);
+                state.scroll_to(0.0, scrolloff);
+                assert!(state.get_selected().is_some_and(|index| index < 20));
+                state.scroll_down(2, scrolloff);
+                state.scroll_up(2, scrolloff);
+                assert!(state.get_selected().is_some_and(|index| index < 20));
+                if viewport > 0 {
+                    assert!(state.get_selected().is_some_and(|index| {
+                        (state.offset()..state.offset() + viewport).contains(&index)
+                    }));
+                }
+            }
+        }
+    }
 
     #[test]
     fn range_selection_expands_contracts_and_commits_with_mark() {

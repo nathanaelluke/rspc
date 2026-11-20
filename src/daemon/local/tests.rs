@@ -238,6 +238,105 @@ async fn interrupted_artwork_reads_restart_the_chunk_on_a_new_connection() {
 }
 
 #[tokio::test]
+async fn first_local_load_preserves_requested_volume_after_reconnect() {
+    let directory = tempfile::tempdir().unwrap();
+    let address = directory.path().join("mpd.sock");
+    let listener = tokio::net::UnixListener::bind(&address).unwrap();
+    let player = expired_player(
+        Settings {
+            address: address.to_string_lossy().into_owned(),
+            password: None,
+        },
+        directory.path().join("lease.json"),
+        false,
+    );
+    player.generation.store(0, Ordering::Relaxed);
+    let (client, peer) = UnixStream::pair().unwrap();
+    player.state.lock().await.wire = Wire::new(Box::new(client));
+    let first = tokio::spawn(async move {
+        let mut peer = BufStream::new(peer);
+        for (expected, response) in [
+            ("ping", "OK\n"),
+            ("partition \"default\"", "OK\n"),
+            ("status", "volume: 88\nstate: stop\nOK\n"),
+            (
+                "outputs",
+                "outputid: 0\noutputname: fixture\nplugin: pulse\noutputenabled: 1\nOK\n",
+            ),
+            ("partition \"rspc\"", "OK\n"),
+            ("moveoutput \"fixture\"", "OK\n"),
+            (
+                "outputs",
+                "outputid: 0\noutputname: fixture\nplugin: pulse\noutputenabled: 1\nOK\n",
+            ),
+            ("enableoutput 0", "OK\n"),
+            ("stop", ""),
+        ] {
+            let mut command = String::new();
+            peer.read_line(&mut command).await.unwrap();
+            assert_eq!(command.trim_end(), expected);
+            peer.write_all(response.as_bytes()).await.unwrap();
+            peer.flush().await.unwrap();
+        }
+    });
+    let second = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufStream::new(stream);
+        stream.write_all(b"OK MPD 0.24.0\n").await.unwrap();
+        stream.flush().await.unwrap();
+        for (expected, response) in [
+            ("partition \"rspc\"", "OK\n"),
+            ("partition \"rspc\"", "OK\n"),
+            (
+                "outputs",
+                "outputid: 0\noutputname: fixture\nplugin: pulse\noutputenabled: 1\nOK\n",
+            ),
+            ("enableoutput 0", "OK\n"),
+            ("stop", "OK\n"),
+            ("clear", "OK\n"),
+            ("repeat 0", "OK\n"),
+            ("random 0", "OK\n"),
+            ("single 1", "OK\n"),
+            ("consume 0", "OK\n"),
+            ("addid \"next.flac\"", "Id: 1\nOK\n"),
+            ("setvol 25", "OK\n"),
+            ("play 0", "OK\n"),
+            ("ping", "OK\n"),
+            ("status", "volume: 25\nstate: play\nelapsed: 1.000\nOK\n"),
+            ("currentsong", "file: next.flac\nOK\n"),
+        ] {
+            let mut command = String::new();
+            stream.read_line(&mut command).await.unwrap();
+            if command == "status\n" && expected != "status" {
+                stream
+                    .write_all(b"volume: 88\nstate: stop\nOK\n")
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+                command.clear();
+                stream.read_line(&mut command).await.unwrap();
+            }
+            assert_eq!(command.trim_end(), expected);
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.flush().await.unwrap();
+        }
+    });
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        player.load("mpd:next.flac", 2, 25, 0),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    first.await.unwrap();
+    second.await.unwrap();
+    let state = player.state.lock().await;
+    assert_eq!(state.current.as_deref(), Some("mpd:next.flac"));
+    assert!(state.observed && !state.ended);
+    assert_eq!(player.generation.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
 async fn reconnecting_a_load_is_atomic_with_respect_to_the_idle_observer() {
     let directory = tempfile::tempdir().unwrap();
     let address = directory.path().join("mpd.sock");
