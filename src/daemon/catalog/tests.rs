@@ -1,6 +1,24 @@
 use super::*;
 
 #[tokio::test]
+async fn random_library_pool_keeps_cached_likes_when_album_tracks_are_unavailable() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut catalog = Catalog::new(false);
+    catalog.disk_root = directory.path().join("catalog");
+    catalog.versions.get_mut().unwrap().clear();
+    *catalog.cooldown.get_mut() = Some(std::time::Instant::now() + Duration::from_secs(30));
+    let liked = playlist_track(0);
+    let mut album = liked["album"].clone();
+    album["rspc_track_uris"] = json!([playlist_track(1)["uri"]]);
+    cache_page(&catalog, "me/tracks", 0, vec![json!({"track":liked})], 1);
+    cache_page(&catalog, "me/albums", 0, vec![json!({"album":album})], 1);
+
+    let tracks = Arc::new(catalog).library_tracks().await.unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0].uri.as_deref(), Some("spotify:track:fixture0"));
+}
+
+#[tokio::test]
 async fn random_library_pool_includes_likes_and_saved_albums_without_duplicate_uris() {
     let directory = tempfile::tempdir().unwrap();
     let mut catalog = Catalog::new(false);

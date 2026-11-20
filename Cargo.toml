@@ -14,7 +14,7 @@ members = ["crates/rspc-ui", "crates/xtask"]
 default-members = [".", "crates/rspc-ui"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [workspace.dependencies]

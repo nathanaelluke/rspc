@@ -72,24 +72,24 @@ impl Catalog {
         if self.demo {
             return self.liked().await;
         }
-        let spotify = async {
-            let mut tracks = self.liked().await?;
-            tracks.extend(self.album_tracks_many(&self.saved_albums().await?).await?);
-            let mut seen = HashSet::new();
-            tracks.retain(|track| {
-                track
-                    .uri
-                    .as_ref()
-                    .is_some_and(|uri| seen.insert(uri.clone()))
-            });
-            Ok::<_, anyhow::Error>(tracks)
+        let album_tracks = async { self.album_tracks_many(&self.saved_albums().await?).await };
+        let (liked, albums, local) = tokio::join!(self.liked(), album_tracks, self.local.all());
+        let mut tracks = match (liked, albums) {
+            (Ok(mut liked), Ok(albums)) => {
+                liked.extend(albums);
+                liked
+            }
+            (Ok(tracks), Err(_)) | (Err(_), Ok(tracks)) => tracks,
+            (Err(error), Err(_)) if local.is_err() => return Err(error),
+            (Err(_), Err(_)) => Vec::new(),
         };
-        let (spotify, local) = tokio::join!(spotify, self.local.all());
-        let tracks = match spotify {
-            Ok(tracks) => tracks,
-            Err(error) if local.is_err() => return Err(error),
-            Err(_) => Vec::new(),
-        };
+        let mut seen = HashSet::new();
+        tracks.retain(|track| {
+            track
+                .uri
+                .as_ref()
+                .is_some_and(|uri| seen.insert(uri.clone()))
+        });
         Ok(prefer_local_tracks(
             tracks,
             local.map_or_else(|_| Vec::new(), |tracks| tracks.as_ref().clone()),

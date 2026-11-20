@@ -1,6 +1,6 @@
 pkgbase = rspc-git
 	pkgdesc = Terminal music player for Spotify, local files and streams
-	pkgver = 0.1.0
+	pkgver = 0.1.2
 	pkgrel = 1
 	url = https://github.com/nathanaelluke/rspc
 	arch = x86_64

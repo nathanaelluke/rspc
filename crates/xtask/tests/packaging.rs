@@ -287,10 +287,20 @@ fn development_recipe_matches_srcinfo_and_service_path() -> Result<()> {
             .arg("-n")
             .arg(directory.join("PKGBUILD")),
     )?;
+    let srcinfo = fs::read_to_string(directory.join(".SRCINFO"))?;
+    let recipe = fs::read_to_string(directory.join("PKGBUILD"))?;
+    assert!(srcinfo.contains("depends = spotify-soloist-bin"));
+    assert!(recipe.contains("'spotify-soloist-bin'"));
     assert!(
-        fs::read_to_string(directory.join(".SRCINFO"))?.contains("depends = spotify-soloist-bin")
+        srcinfo
+            .lines()
+            .any(|line| line.trim() == format!("pkgver = {}", release::VERSION))
     );
-    assert!(fs::read_to_string(directory.join("PKGBUILD"))?.contains("'spotify-soloist-bin'"));
+    assert!(
+        recipe
+            .lines()
+            .any(|line| line == format!("pkgver={}", release::VERSION))
+    );
     assert!(root.join("packaging/rspc.service").is_file());
     Ok(())
 }

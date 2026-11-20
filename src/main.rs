@@ -246,12 +246,16 @@ async fn start_daemon(args: &Args, paths: &Paths) -> Result<()> {
 async fn ensure_daemon_compatible(socket: &Path) -> Result<()> {
     let commands = request(socket, "commands").await?;
     anyhow::ensure!(
-        ["rspc_library_add", "rspc_library_remove"]
-            .iter()
-            .all(|command| commands
-                .lines()
-                .any(|line| line.strip_prefix("command: ") == Some(*command))),
-        "The running rspc daemon is missing Spotify library support. Run `rspc stop`, then reopen rspc to load the updated daemon."
+        [
+            "rspc_library_add",
+            "rspc_library_remove",
+            "rspc_library_toggle"
+        ]
+        .iter()
+        .all(|command| commands
+            .lines()
+            .any(|line| line.strip_prefix("command: ") == Some(*command))),
+        "The running rspc daemon is older than this build. Run `rspc stop`, then reopen rspc to load the updated daemon."
     );
     Ok(())
 }
@@ -442,6 +446,10 @@ mod tests {
             ("command: status\n", false),
             (
                 "command: rspc_library_add\ncommand: rspc_library_remove\n",
+                false,
+            ),
+            (
+                "command: rspc_library_add\ncommand: rspc_library_remove\ncommand: rspc_library_toggle\n",
                 true,
             ),
         ] {

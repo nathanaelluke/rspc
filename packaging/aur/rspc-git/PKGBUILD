@@ -1,6 +1,6 @@
 # Build the current rspc sources. Soloist stays a separate AUR dependency.
 pkgname=rspc-git
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc='Terminal music player for Spotify, local files and streams'
 arch=('x86_64' 'aarch64')
