@@ -79,10 +79,11 @@ pub fn check_file(path: &Path, data: &[u8]) -> Vec<Finding> {
     if data.contains(&0) {
         let reviewed = match path.to_str() {
             Some("crates/rspc-ui/assets/default.jpg" | "assets/screenshot.png") => true,
-            Some("crates/rspc-ui/assets/default.png") => {
-                format!("{:x}", Sha256::digest(data))
-                    == "4a9872a79fd6df603cc0af0caa3611c583ad6832f2c1b161f45108e9c44ffe5a"
-            }
+            Some("crates/rspc-ui/assets/default.png") => matches!(
+                format!("{:x}", Sha256::digest(data)).as_str(),
+                "4a9872a79fd6df603cc0af0caa3611c583ad6832f2c1b161f45108e9c44ffe5a"
+                    | "0824ae3a918355a3ab33f32de11d338c722f07ba070c744167243f6fe8c1eaac"
+            ),
             _ => false,
         };
         return if reviewed {
