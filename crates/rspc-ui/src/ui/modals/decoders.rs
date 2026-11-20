@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Row, Table, TableState},
 };
 
-use super::Modal;
+use super::{Modal, limit_modal_width};
 use crate::{
     config::keys::CommonAction,
     ctx::Ctx,
@@ -87,9 +87,12 @@ impl Modal for DecodersModal {
     }
 
     fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
-        let popup_area = frame
-            .area()
-            .centered(constraint!(==80%), constraint!(==80%));
+        let popup_area = limit_modal_width(
+            frame
+                .area()
+                .centered(constraint!(==80%), constraint!(==80%)),
+            ctx.config.modal_max_aspect_ratio,
+        );
         frame.render_widget(Clear, popup_area);
         if let Some(bg_color) = ctx.config.theme.modal_background_color {
             frame.render_widget(

@@ -28,10 +28,10 @@ use crate::{
             info_list_modal::{InfoListModal, KeyValues},
             input_modal::InputModal,
             menu::{
-                add_saved_library_actions, add_song_collection_actions, add_to_liked_songs,
+                add_saved_library_actions, add_song_collection_actions,
                 add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
                 create_rating_modal, create_save_modal, delete_from_playlist_or_show_confirmation,
-                modal::MenuModal, song_sort_modal,
+                modal::MenuModal, song_sort_modal, update_selected_liked_songs,
             },
         },
         panes::Pane,
@@ -558,11 +558,14 @@ where
 
         match action.to_owned() {
             CommonAction::AddToLikedSongs { current: true } => event.abandon(),
-            CommonAction::AddToLikedSongs { current: false } => {
+            action @ (CommonAction::AddToLikedSongs { current: false }
+            | CommonAction::ToggleLikedSongs) => {
                 let songs = self.list_songs_in_items(false);
-                add_to_liked_songs(ctx, move |client| {
-                    Ok(songs(client)?.into_iter().map(|song| song.file).collect())
-                });
+                update_selected_liked_songs(
+                    ctx,
+                    move |client| Ok(songs(client)?.into_iter().map(|song| song.file).collect()),
+                    matches!(action, CommonAction::ToggleLikedSongs),
+                );
             }
             CommonAction::Sort { by } => self.change_sort(Some(by), ctx)?,
             CommonAction::ReverseSort => self.change_sort(None, ctx)?,

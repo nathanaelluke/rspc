@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use anyhow::Result;
-use ratatui::{Frame, symbols};
+use ratatui::{Frame, layout::Rect, symbols};
 
 use super::UiEvent;
 use crate::{
@@ -23,6 +23,30 @@ pub mod keybinds;
 pub mod menu;
 pub mod outputs;
 pub mod select_modal;
+
+fn terminal_columns_per_row() -> f64 {
+    crossterm::terminal::window_size()
+        .ok()
+        .filter(|size| size.width > 0 && size.height > 0 && size.columns > 0 && size.rows > 0)
+        .map_or(2.0, |size| {
+            (f64::from(size.height) / f64::from(size.rows))
+                / (f64::from(size.width) / f64::from(size.columns))
+        })
+}
+
+fn limit_modal_width(area: Rect, ratio: Option<f64>) -> Rect {
+    let Some(ratio) = ratio else {
+        return area;
+    };
+    let width = ((f64::from(area.height) * ratio * terminal_columns_per_row()) as u16)
+        .max(1)
+        .min(area.width);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        width,
+        ..area
+    }
+}
 
 #[allow(unused)]
 pub(crate) trait Modal: std::fmt::Debug {

@@ -148,7 +148,7 @@ impl Default for KeyConfigFile {
             (s().char('z').ctrl(),                C::ContextMenu {}),
             (s().char('s').ctrl().char('s'),      C::Save { kind: SaveKind::Modal { all: false, duplicates_strategy: DuplicateStrategy::Ask } }),
             (s().char('s').ctrl().char('a'),      C::Save { kind: SaveKind::Modal { all: true, duplicates_strategy: DuplicateStrategy::Ask } }),
-            (s().char('s').ctrl().char('l'),      C::AddToLikedSongs { current: false }),
+            (s().char('s').ctrl().char('l'),      C::ToggleLikedSongs),
             (s().char('s').ctrl().char('L'),      C::AddToLikedSongs { current: true }),
             (s().char('r'),                       C::Rate { kind: RateKind::default(), current: false, min_rating: 0, max_rating: 10 }),
         ]);

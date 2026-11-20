@@ -280,6 +280,80 @@ fn liked_song_shortcuts_save_the_selection_and_current_song_independently() -> R
 }
 
 #[test]
+fn changing_liked_songs_preserves_the_search_query_and_selection() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor, WaitUntilGone};
+
+    let h = Harness::demo()?;
+    h.tui_steps(
+        &[
+            Key(b"7"),
+            WaitFor(b"Any Tag"),
+            Key(b"i"),
+            Key(b"wInDoW\r"),
+            WaitFor(b"Found 1 matching songs"),
+            Key(b"l"),
+            Key(b"\x1a"),
+            WaitFor(b"Remove from Liked Songs"),
+            Key(b"/"),
+            Key(b"Remove from Liked Songs"),
+            Key(b"\r"),
+            Key(b"\r"),
+            WaitFor(b"Remove 1 song from Spotify Liked Songs?"),
+            Key(b"\r"),
+            WaitFor(b"Removed 1 song from Liked Songs"),
+            Key(b"3"),
+            WaitFor(b"Morning Light"),
+            WaitUntilGone(b"Second Window"),
+            Key(b"7"),
+            WaitFor(b"wInDoW"),
+            WaitFor(b"Second Window"),
+            Key(b"\x1a"),
+            WaitFor(b"Add to Liked Songs"),
+            Key(b"/"),
+            Key(b"Add to Liked Songs"),
+            Key(b"\r"),
+            Key(b"\r"),
+            WaitFor(b"Added 1 song to Liked Songs"),
+            Key(b"3"),
+            WaitFor(b"Second Window"),
+            Key(b"7"),
+            WaitFor(b"wInDoW"),
+            WaitFor(b"Second Window"),
+            Key(b"\x13l"),
+            WaitFor(b"Removed 1 song from Liked Songs"),
+            WaitFor(b"wInDoW"),
+            WaitFor(b"Second Window"),
+            Key(b"\x13l"),
+            WaitFor(b"Added 1 song to Liked Songs"),
+        ],
+        false,
+    )?;
+    assert!(h.raw("lsinfo \"Liked Songs\"")?.contains("Second Window"));
+    Ok(())
+}
+
+#[test]
+fn liked_song_toggle_inverts_each_marked_track() -> Result<()> {
+    use support::TuiStep::{Key, WaitFor};
+
+    let h = Harness::demo()?;
+    h.raw("rspc_library_remove spotify:track:demo2")?;
+    h.tui_steps(
+        &[
+            Key(b"mjm"),
+            Key(b"\x13l"),
+            WaitFor(b"Liked 1 and unliked 1 in Liked Songs"),
+        ],
+        false,
+    )?;
+    let liked = h.raw("lsinfo \"Liked Songs\"")?;
+    assert!(!liked.contains("spotify:track:demo1"));
+    assert!(liked.contains("spotify:track:demo2"));
+    assert!(liked.contains("spotify:track:demo3"));
+    Ok(())
+}
+
+#[test]
 fn liked_song_menus_follow_membership_and_library_changes_stay_quiet() -> Result<()> {
     use support::TuiStep::{Key, WaitFor, WaitUntilGone};
     let h = Harness::demo()?;

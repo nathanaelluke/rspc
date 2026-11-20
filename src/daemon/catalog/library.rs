@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::LibraryItem;
+use crate::{model::LibraryItem, spotify::CollectionEdit};
 use std::collections::HashSet;
 
 impl Catalog {
@@ -23,54 +23,72 @@ impl Catalog {
     }
 
     pub async fn add_liked(self: &Arc<Self>, uris: &[String]) -> Result<usize> {
-        self.update_liked(uris, false).await
+        let (added, _) = self.update_liked(uris, CollectionEdit::Add).await?;
+        Ok(added)
     }
     pub async fn remove_liked(self: &Arc<Self>, uris: &[String]) -> Result<usize> {
-        self.update_liked(uris, true).await
+        let (_, removed) = self.update_liked(uris, CollectionEdit::Remove).await?;
+        Ok(removed)
     }
-    async fn update_liked(self: &Arc<Self>, uris: &[String], remove: bool) -> Result<usize> {
+    pub async fn toggle_liked(self: &Arc<Self>, uris: &[String]) -> Result<(usize, usize)> {
+        self.update_liked(uris, CollectionEdit::Toggle).await
+    }
+    async fn update_liked(
+        self: &Arc<Self>,
+        uris: &[String],
+        edit: CollectionEdit,
+    ) -> Result<(usize, usize)> {
         ensure!(!uris.is_empty(), "No songs selected");
         ensure!(
             uris.iter().all(|uri| uri.starts_with("spotify:track:")),
             "Liked Songs accepts Spotify tracks only"
         );
-        let count = if self.demo && remove {
-            let uris: HashSet<_> = uris.iter().map(String::as_str).collect();
-            let mut liked = self.demo_liked.lock().await;
-            let before = liked.len();
-            liked.retain(|track| track.uri.as_deref().is_none_or(|uri| !uris.contains(uri)));
-            before - liked.len()
-        } else if self.demo {
+        let (added, removed) = if self.demo {
             let mut tracks = Vec::new();
-            for uri in uris {
-                tracks.extend(self.resolve(uri).await?);
+            if edit != CollectionEdit::Remove {
+                for uri in uris {
+                    tracks.extend(self.resolve(uri).await?);
+                }
             }
             let mut liked = self.demo_liked.lock().await;
-            let mut known: HashSet<_> =
-                liked.iter().filter_map(|track| track.uri.clone()).collect();
-            tracks.retain(|track| {
-                track
-                    .uri
-                    .as_ref()
-                    .is_some_and(|uri| known.insert(uri.clone()))
-            });
-            let added_at = chrono::Utc::now();
-            for track in &mut tracks {
-                track.added_at = Some(added_at);
+            if !tracks.is_empty() {
+                let mut known: HashSet<_> =
+                    liked.iter().filter_map(|track| track.uri.clone()).collect();
+                tracks.retain(|track| {
+                    track
+                        .uri
+                        .as_ref()
+                        .is_some_and(|uri| known.insert(uri.clone()))
+                });
+                let added_at = chrono::Utc::now();
+                for track in &mut tracks {
+                    track.added_at = Some(added_at);
+                }
             }
             let count = tracks.len();
+            let before = liked.len();
+            if edit != CollectionEdit::Add {
+                let uris: HashSet<_> = uris.iter().map(String::as_str).collect();
+                liked.retain(|track| track.uri.as_deref().is_none_or(|uri| !uris.contains(uri)));
+            }
+            let removed = before - liked.len();
             liked.splice(0..0, tracks);
-            count
-        } else if remove {
-            crate::spotify::remove_liked_tracks(uris).await?
+            (count, removed)
         } else {
-            crate::spotify::add_liked_tracks(uris).await?
+            match edit {
+                CollectionEdit::Remove => (0, crate::spotify::remove_liked_tracks(uris).await?),
+                CollectionEdit::Add => (crate::spotify::add_liked_tracks(uris).await?, 0),
+                CollectionEdit::Toggle => crate::spotify::toggle_liked_tracks(uris).await?,
+            }
         };
-        if count > 0 {
-            self.refresh_library("me/tracks", remove.then(|| uris.iter().map(String::as_str)))
-                .await?;
+        if added + removed > 0 {
+            self.refresh_library(
+                "me/tracks",
+                (removed > 0).then(|| uris.iter().map(String::as_str)),
+            )
+            .await?;
         }
-        Ok(count)
+        Ok((added, removed))
     }
 
     pub async fn library_items(

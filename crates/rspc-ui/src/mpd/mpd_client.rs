@@ -421,6 +421,29 @@ pub trait MpdClient: Sized {
 }
 
 impl Client<'_> {
+    pub fn toggle_liked_tracks(&mut self, uris: &[String]) -> MpdResult<(usize, usize)> {
+        self.with_catalog_timeout(|client| {
+            let mut added = 0;
+            let mut removed = 0;
+            for chunk in uris.chunks(1000) {
+                let args = chunk.iter().map(|uri| uri.quote_and_escape()).join(" ");
+                client.execute(&format!("rspc_library_toggle {args}"))?;
+                let values: MpdList = client.read_response()?;
+                let [add_count, remove_count] = values.0.as_slice() else {
+                    return Err(MpdError::Parse("missing Liked Songs toggle counts".into()));
+                };
+                let parse = |value: &str| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| MpdError::Parse(error.to_string()))
+                };
+                added += parse(add_count)?;
+                removed += parse(remove_count)?;
+            }
+            Ok((added, removed))
+        })
+    }
+
     fn update_liked_tracks(&mut self, uris: &[String], remove: bool) -> MpdResult<usize> {
         if uris.iter().any(|uri| !uri.starts_with("spotify:track:")) {
             return Err(MpdError::Generic(

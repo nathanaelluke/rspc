@@ -367,11 +367,11 @@ mod test {
     }
 
     #[rstest]
-    #[case('l', false)]
-    #[case('L', true)]
+    #[case('l', CommonAction::ToggleLikedSongs)]
+    #[case('L', CommonAction::AddToLikedSongs { current: true })]
     fn liked_song_shortcuts_distinguish_selection_from_current_playback(
         #[case] suffix: char,
-        #[case] current: bool,
+        #[case] expected: CommonAction,
         app_event_channel: (Sender<AppEvent>, Receiver<AppEvent>),
         work_request_channel: (Sender<WorkRequest>, Receiver<WorkRequest>),
         client_request_channel: (Sender<ClientRequest>, Receiver<ClientRequest>),
@@ -401,9 +401,7 @@ mod test {
         else {
             panic!("expected a resolved shortcut");
         };
-        assert!(matches!(actions.as_slice(),
-            [Actions::Common(CommonAction::AddToLikedSongs { current: actual })] if *actual == current
-        ));
+        assert!(matches!(actions.as_slice(), [Actions::Common(action)] if *action == expected));
     }
 
     #[rstest]

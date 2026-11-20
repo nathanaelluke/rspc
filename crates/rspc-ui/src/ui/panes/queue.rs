@@ -45,10 +45,10 @@ use crate::{
             info_list_modal::InfoListModal,
             input_modal::InputModal,
             menu::{
-                add_saved_library_actions, add_song_collection_actions, add_to_liked_songs,
+                add_saved_library_actions, add_song_collection_actions,
                 add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
                 create_rating_modal, create_save_modal, delete_from_playlist_or_show_confirmation,
-                modal::MenuModal,
+                modal::MenuModal, update_selected_liked_songs,
             },
             select_modal::SelectModal,
         },
@@ -1136,12 +1136,17 @@ impl Pane for QueuePane {
                     self.open_context_menu(ctx);
                 }
                 CommonAction::AddToLikedSongs { current: true } => event.abandon(),
-                CommonAction::AddToLikedSongs { current: false } => {
+                action @ (CommonAction::AddToLikedSongs { current: false }
+                | CommonAction::ToggleLikedSongs) => {
                     let paths = self
                         .items(false)
                         .map(|(_, song)| song.file.clone())
                         .collect();
-                    add_to_liked_songs(ctx, move |_| Ok(paths));
+                    update_selected_liked_songs(
+                        ctx,
+                        move |_| Ok(paths),
+                        matches!(action, CommonAction::ToggleLikedSongs),
+                    );
                 }
                 CommonAction::Sort { .. } | CommonAction::ReverseSort => {
                     status_warn!("Open a playlist or album to sort its songs");

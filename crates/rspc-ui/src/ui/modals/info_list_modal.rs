@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Row, Table, TableState},
 };
 
-use super::Modal;
+use super::{Modal, terminal_columns_per_row};
 use crate::{
     MpdQueryResult,
     config::keys::CommonAction,
@@ -28,6 +28,7 @@ use crate::{
 };
 
 type InfoRequest = Box<dyn FnOnce(&mut Client<'_>) -> Result<KeyValues> + Send + Sync>;
+const MIN_SELECTION_INFO_WIDTH: u16 = 34;
 
 #[derive(derive_more::Debug)]
 pub struct InfoListModal {
@@ -147,7 +148,7 @@ impl InfoListModal {
         Self::builder()
             .items(items)
             .title("Selection info")
-            .column_widths(&[30, 70])
+            .column_widths(&[50, 50])
             .build()
     }
 
@@ -236,22 +237,23 @@ impl InfoListModal {
                     high = u32::from(candidate) - 1;
                 }
             }
+            if self.items.song_file.is_none() {
+                let preferred_width = MIN_SELECTION_INFO_WIDTH
+                    .min(max_area.width)
+                    .min((f64::from(max_area.height) * ratio) as u16);
+                width = width.max(preferred_width);
+            }
         }
-        let height = height_at(self, width);
+        let mut height = height_at(self, width);
+        if self.items.song_file.is_none()
+            && let Some(ratio) = columns_per_row
+        {
+            height = height.max(((f64::from(width) / ratio).ceil() as u16).min(max_area.height));
+        }
         let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
         self.layout_cache = Some((area, columns_per_row, popup));
         popup
     }
-}
-
-fn terminal_columns_per_row() -> f64 {
-    crossterm::terminal::window_size()
-        .ok()
-        .filter(|size| size.width > 0 && size.height > 0 && size.columns > 0 && size.rows > 0)
-        .map_or(2.0, |size| {
-            (f64::from(size.height) / f64::from(size.rows))
-                / (f64::from(size.width) / f64::from(size.columns))
-        })
 }
 
 impl Modal for InfoListModal {
@@ -278,12 +280,12 @@ impl Modal for InfoListModal {
                 Ok(MpdQueryResult::SelectionInfo { modal, items })
             });
         }
-        let columns_per_row = self
-            .items
-            .song_file
-            .as_ref()
-            .and(ctx.config.song_info_max_aspect_ratio)
-            .map(|ratio| ratio * terminal_columns_per_row());
+        let ratio = if self.items.song_file.is_some() {
+            ctx.config.song_info_max_aspect_ratio
+        } else {
+            ctx.config.modal_max_aspect_ratio
+        };
+        let columns_per_row = ratio.map(|ratio| ratio * terminal_columns_per_row());
         let popup_area = self.popup_area(frame.area(), columns_per_row);
         let column_constraints = self
             .column_widths
@@ -313,7 +315,13 @@ impl Modal for InfoListModal {
             Layout::vertical([Constraint::Length(2), Constraint::Percentage(100)])
                 .areas(block.inner(popup_area));
         let header_area = header_area.inner(margin);
-        let table_area = table_area.inner(margin);
+        let mut table_area = table_area.inner(margin);
+        table_area.height = table_area.height.min(
+            self.wrapped_rows
+                .len()
+                .max(self.min_rows)
+                .min(u16::MAX as usize) as u16,
+        );
 
         self.scrolling_state
             .set_content_and_viewport_len(self.wrapped_rows.len(), table_area.height.into());
@@ -683,18 +691,35 @@ mod tests {
     }
 
     #[rstest]
-    fn song_info_ratio_applies_through_config_and_survives_resizes(mut ctx: Ctx) {
-        let mut modal = song_info_fixture();
+    #[case(false)]
+    #[case(true)]
+    fn info_ratio_applies_through_config_and_survives_resizes(
+        mut ctx: Ctx,
+        #[case] selection: bool,
+    ) {
+        let mut modal = if selection {
+            InfoListModal::for_selection(vec![
+                ("Count".into(), "15 tracks".into()),
+                (
+                    "Album".into(),
+                    "A long album name that needs to wrap".into(),
+                ),
+            ])
+        } else {
+            song_info_fixture()
+        };
         let mut terminal = Terminal::new(TestBackend::new(400, 60)).expect("test terminal");
-        Arc::make_mut(&mut ctx.config).song_info_max_aspect_ratio = Some(1.0);
+        let config = Arc::make_mut(&mut ctx.config);
+        config.song_info_max_aspect_ratio = (!selection).then_some(1.0);
+        config.modal_max_aspect_ratio = selection.then_some(1.0);
         for (width, height) in [(400, 60), (80, 24), (20, 60), (1, 1), (400, 60)] {
             terminal.backend_mut().resize(width, height);
             terminal
                 .resize(Rect::new(0, 0, width, height))
                 .expect("resize terminal");
             terminal
-                .draw(|frame| modal.render(frame, &mut ctx).expect("render song info"))
-                .expect("draw song info");
+                .draw(|frame| modal.render(frame, &mut ctx).expect("render info popup"))
+                .expect("draw info popup");
             let popup = modal.layout_cache.expect("computed layout").2;
             assert!(popup.right() <= width && popup.bottom() <= height);
             if width > 1 && height > 1 {
@@ -703,7 +728,9 @@ mod tests {
                 );
             }
         }
-        Arc::make_mut(&mut ctx.config).song_info_max_aspect_ratio = None;
+        let config = Arc::make_mut(&mut ctx.config);
+        config.song_info_max_aspect_ratio = None;
+        config.modal_max_aspect_ratio = None;
         terminal
             .draw(|frame| {
                 modal

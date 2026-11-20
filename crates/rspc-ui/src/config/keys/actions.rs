@@ -806,6 +806,7 @@ impl Default for DeleteKind {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq)]
 pub enum CommonActionFile {
+    ToggleLikedSongs,
     AddToLikedSongs {
         #[serde(default)]
         current: bool,
@@ -876,6 +877,7 @@ pub enum CommonActionFile {
 #[derive(Debug, Display, Clone, EnumDiscriminants, PartialEq)]
 #[strum_discriminants(derive(VariantArray))]
 pub enum CommonAction {
+    ToggleLikedSongs,
     AddToLikedSongs {
         current: bool,
     },
@@ -935,6 +937,7 @@ impl ToDescription for CommonAction {
         match self {
             CommonAction::Sort { by } => format!("Sort songs by {by}").into(),
             CommonAction::ReverseSort => "Reverse the song view order".into(),
+            CommonAction::ToggleLikedSongs => "Toggle Spotify Liked Songs for selected or marked songs".into(),
             CommonAction::AddToLikedSongs { current: false } => "Add selected or marked songs to Spotify Liked Songs".into(),
             CommonAction::AddToLikedSongs { current: true } => "Add the currently playing song to Spotify Liked Songs".into(),
             CommonAction::Up => "Go up".into(),
@@ -1116,6 +1119,7 @@ impl TryFrom<CommonActionFile> for CommonAction {
 
     fn try_from(value: CommonActionFile) -> Result<Self, Self::Error> {
         Ok(match value {
+            CommonActionFile::ToggleLikedSongs => CommonAction::ToggleLikedSongs,
             CommonActionFile::AddToLikedSongs { current } => {
                 CommonAction::AddToLikedSongs { current }
             }

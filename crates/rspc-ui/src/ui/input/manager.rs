@@ -85,9 +85,13 @@ impl InputManager {
         buffer!(self, id).clear();
     }
 
-    pub fn clear_all_buffers(&self) {
-        self.normal_mode();
-        self.buffers.borrow_mut().clear();
+    pub fn retain_buffers(&self, keep: impl Fn(BufferId) -> bool) {
+        if let InputMode::Insert(id) = self.mode.get()
+            && !keep(id)
+        {
+            self.normal_mode();
+        }
+        self.buffers.borrow_mut().retain(|id, _| keep(*id));
     }
 
     pub fn mode(&self) -> InputMode {

@@ -2,6 +2,7 @@
 mod auth;
 mod catalog;
 use catalog::{collection as library, playlists, search};
+pub(crate) use library::CollectionEdit;
 mod protocol {
     include!(concat!(env!("OUT_DIR"), "/spotify-protocol/mod.rs"));
 }
@@ -48,6 +49,10 @@ pub async fn add_liked_tracks(uris: &[String]) -> Result<usize> {
 pub async fn remove_liked_tracks(uris: &[String]) -> Result<usize> {
     let session = connection::current().await.map_err(anyhow::Error::from)?;
     library::remove_tracks(&session, uris).await
+}
+pub async fn toggle_liked_tracks(uris: &[String]) -> Result<(usize, usize)> {
+    let session = connection::current().await.map_err(anyhow::Error::from)?;
+    library::toggle_tracks(&session, uris).await
 }
 pub async fn update_saved_item(uri: &str, remove: bool) -> Result<usize> {
     let session = connection::current().await.map_err(anyhow::Error::from)?;

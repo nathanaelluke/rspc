@@ -79,6 +79,7 @@ const COMMANDS: &[&str] = &[
     "rspc_selection_info",
     "rspc_library_add",
     "rspc_library_remove",
+    "rspc_library_toggle",
     "rspc_library_items",
     "rspc_library_update",
     "rspc_diagnostics",
@@ -386,6 +387,13 @@ async fn execute_command(engine: &Engine, args: &[String], binary_limit: usize) 
                 engine.changed(vec!["database"]);
             }
             format!("library_{label}: {count}\n")
+        }
+        "rspc_library_toggle" => {
+            let (added, removed) = engine.catalog.toggle_liked(&args[1..]).await?;
+            if added + removed > 0 {
+                engine.changed(vec!["database"]);
+            }
+            format!("library_added: {added}\nlibrary_removed: {removed}\n")
         }
         "rspc_library_items" => {
             let items = engine

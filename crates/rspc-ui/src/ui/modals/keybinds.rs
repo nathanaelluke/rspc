@@ -13,7 +13,7 @@ use ratatui::{
 };
 use strum::{IntoDiscriminant, VariantArray};
 
-use super::Modal;
+use super::{Modal, limit_modal_width};
 use crate::{
     config::keys::{CommonAction, ToDescription},
     ctx::Ctx,
@@ -72,7 +72,10 @@ fn common_section(action: &CommonAction) -> &'static str {
     use CommonAction as A;
     match action {
         A::Sort { .. } | A::ReverseSort => "Sorting",
-        A::AddToLikedSongs { .. } | A::Save { .. } | A::DeleteFromPlaylist { .. } => "Library",
+        A::ToggleLikedSongs
+        | A::AddToLikedSongs { .. }
+        | A::Save { .. }
+        | A::DeleteFromPlaylist { .. } => "Library",
         A::AddOptions { .. } => "Queue",
         A::Select
         | A::SelectRange
@@ -307,9 +310,12 @@ impl Modal for KeybindsModal {
     }
 
     fn render(&mut self, frame: &mut Frame, ctx: &mut Ctx) -> Result<()> {
-        let popup_area = frame
-            .area()
-            .centered(constraint!(==90%), constraint!(==90%));
+        let popup_area = limit_modal_width(
+            frame
+                .area()
+                .centered(constraint!(==90%), constraint!(==90%)),
+            ctx.config.modal_max_aspect_ratio,
+        );
         frame.render_widget(Clear, popup_area);
         if let Some(bg_color) = ctx.config.theme.modal_background_color {
             frame.render_widget(
@@ -597,7 +603,7 @@ mod tests {
             ),
             (
                 KeySequence::new().char('s').ctrl().char('l'),
-                CommonAction::AddToLikedSongs { current: false },
+                CommonAction::ToggleLikedSongs,
             ),
             (
                 KeySequence::new().char('s').ctrl().char('L'),

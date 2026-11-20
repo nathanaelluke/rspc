@@ -38,15 +38,15 @@ use crate::{
     ui::{
         UiEvent,
         dirstack::Dir,
-        input::InputResultEvent,
+        input::{BufferId, InputResultEvent},
         modals::{
             info_list_modal::InfoListModal,
             input_modal::InputModal,
             menu::{
-                add_saved_library_actions, add_song_collection_actions, add_to_liked_songs,
+                add_saved_library_actions, add_song_collection_actions,
                 add_to_playlist_or_show_modal, create_add_modal, create_delete_modal,
                 create_rating_modal, create_save_modal, delete_from_playlist_or_show_confirmation,
-                modal::MenuModal,
+                modal::MenuModal, update_selected_liked_songs,
             },
             select_modal::SelectModal,
         },
@@ -69,6 +69,13 @@ pub struct SearchPane {
 const SEARCH: &str = "search";
 
 impl SearchPane {
+    pub fn owns_input_buffer(&self, id: BufferId) -> bool {
+        self.songs_dir.filter_buffer_id == id
+            || self.inputs.inputs.iter().any(|input| {
+                matches!(input, InputType::Textbox(input) | InputType::Numberbox(input) if input.buffer_id == id)
+            })
+    }
+
     pub fn new(ctx: &Ctx) -> Self {
         let config = &ctx.config;
 
@@ -370,12 +377,17 @@ impl SearchPane {
         } else if let Some(action) = event.claim_common() {
             match action.to_owned() {
                 CommonAction::AddToLikedSongs { current: true } => event.abandon(),
-                CommonAction::AddToLikedSongs { current: false } => {
+                action @ (CommonAction::AddToLikedSongs { current: false }
+                | CommonAction::ToggleLikedSongs) => {
                     let paths = self
                         .items(false)
                         .map(|(_, song)| song.file.clone())
                         .collect();
-                    add_to_liked_songs(ctx, move |_| Ok(paths));
+                    update_selected_liked_songs(
+                        ctx,
+                        move |_| Ok(paths),
+                        matches!(action, CommonAction::ToggleLikedSongs),
+                    );
                 }
                 CommonAction::Sort { .. } | CommonAction::ReverseSort => {
                     status_warn!("Open a playlist or album to sort its songs");
@@ -611,12 +623,17 @@ impl SearchPane {
         } else if let Some(action) = event.claim_common() {
             match action.to_owned() {
                 CommonAction::AddToLikedSongs { current: true } => event.abandon(),
-                CommonAction::AddToLikedSongs { current: false } => {
+                action @ (CommonAction::AddToLikedSongs { current: false }
+                | CommonAction::ToggleLikedSongs) => {
                     let paths = self
                         .items(false)
                         .map(|(_, song)| song.file.clone())
                         .collect();
-                    add_to_liked_songs(ctx, move |_| Ok(paths));
+                    update_selected_liked_songs(
+                        ctx,
+                        move |_| Ok(paths),
+                        matches!(action, CommonAction::ToggleLikedSongs),
+                    );
                 }
                 CommonAction::Sort { .. } | CommonAction::ReverseSort => {
                     status_warn!("Open a playlist or album to sort its songs");
@@ -1192,16 +1209,14 @@ impl Pane for SearchPane {
 
     fn on_event(&mut self, event: &mut UiEvent, _is_visible: bool, ctx: &Ctx) -> Result<()> {
         match event {
-            UiEvent::Database => {
+            UiEvent::Database if !ctx.supported_commands.contains("rspc_identity") => {
                 self.pending_search = None;
                 self.songs_dir = Dir::default();
                 self.phase = Phase::Search;
 
-                if !ctx.supported_commands.contains("rspc_identity") {
-                    status_warn!(
-                        "The music database has been updated. The current tab has been reinitialized in the root directory to prevent inconsistent behaviours."
-                    );
-                }
+                status_warn!(
+                    "The music database has been updated. The current tab has been reinitialized in the root directory to prevent inconsistent behaviours."
+                );
             }
             UiEvent::Reconnected => {
                 self.pending_search = None;

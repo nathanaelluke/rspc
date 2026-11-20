@@ -32,12 +32,26 @@ impl CollectionCache {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CollectionEdit {
+    Add,
+    Remove,
+    Toggle,
+}
+
 pub async fn add_tracks(client: &Client, uris: &[String]) -> anyhow::Result<usize> {
-    update_items(client, uris, CollectionKind::Track, false).await
+    let (added, _) = update_items(client, uris, CollectionKind::Track, CollectionEdit::Add).await?;
+    Ok(added)
 }
 
 pub async fn remove_tracks(client: &Client, uris: &[String]) -> anyhow::Result<usize> {
-    update_items(client, uris, CollectionKind::Track, true).await
+    let (_, removed) =
+        update_items(client, uris, CollectionKind::Track, CollectionEdit::Remove).await?;
+    Ok(removed)
+}
+
+pub async fn toggle_tracks(client: &Client, uris: &[String]) -> anyhow::Result<(usize, usize)> {
+    update_items(client, uris, CollectionKind::Track, CollectionEdit::Toggle).await
 }
 
 pub async fn update_saved(client: &Client, uri: &str, remove: bool) -> anyhow::Result<usize> {
@@ -48,7 +62,13 @@ pub async fn update_saved(client: &Client, uri: &str, remove: bool) -> anyhow::R
     } else {
         anyhow::bail!("Select a Spotify album or artist");
     };
-    update_items(client, &[uri.to_owned()], kind, remove).await
+    let edit = if remove {
+        CollectionEdit::Remove
+    } else {
+        CollectionEdit::Add
+    };
+    let (added, removed) = update_items(client, &[uri.to_owned()], kind, edit).await?;
+    Ok(added + removed)
 }
 
 enum CollectionKind {
@@ -78,8 +98,8 @@ async fn update_items(
     client: &Client,
     uris: &[String],
     kind: CollectionKind,
-    remove: bool,
-) -> anyhow::Result<usize> {
+    edit: CollectionEdit,
+) -> anyhow::Result<(usize, usize)> {
     let prefix = format!("spotify:{}:", kind.name());
     let mut unique = HashSet::new();
     for uri in uris {
@@ -95,9 +115,11 @@ async fn update_items(
     let _write = client.collections.writes.lock().await;
     let existing = load(client, kind.set()).await?;
     let known: HashSet<_> = existing.iter().map(|entry| entry.uri.as_str()).collect();
-    unique.retain(|uri| known.contains(uri) == remove);
-    if unique.is_empty() {
-        return Ok(0);
+    if edit != CollectionEdit::Toggle {
+        unique.retain(|uri| known.contains(uri) == (edit == CollectionEdit::Remove));
+        if unique.is_empty() {
+            return Ok((0, 0));
+        }
     }
     let added_at = chrono::Utc::now().timestamp().try_into()?;
     let items = uris
@@ -106,11 +128,12 @@ async fn update_items(
         .map(|uri| CollectionItem {
             uri: uri.clone(),
             added_at,
-            is_removed: remove,
+            is_removed: known.contains(uri.as_str()),
             ..Default::default()
         })
         .collect::<Vec<_>>();
-    let count = items.len();
+    let removed = items.iter().filter(|item| item.is_removed).count();
+    let added = items.len() - removed;
     client
         .collection_write(&WriteRequest {
             username: client.username(),
@@ -122,7 +145,7 @@ async fn update_items(
         .await
         .map_err(request::upstream)?;
     *client.collections.gate(kind.set()).await.lock().await = None;
-    Ok(count)
+    Ok((added, removed))
 }
 
 async fn load(client: &Client, name: &'static str) -> anyhow::Result<Arc<Vec<CollectionItem>>> {

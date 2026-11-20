@@ -11,6 +11,7 @@
     max_fps: 30,
     // Visual width / height limit for song info; None disables the limit.
     song_info_max_aspect_ratio: Some(2.0),
+    modal_max_aspect_ratio: Some(2.0),
     scrolloff: 0,
     wrap_navigation: false,
     enable_mouse: true,
@@ -125,7 +126,7 @@
             "<C-z>":      ContextMenu(),
             "<C-s>s":     Save(kind: Modal(all: false, duplicates_strategy: Ask)),
             "<C-s>a":     Save(kind: Modal(all: true, duplicates_strategy: Ask)),
-            "<C-s>l":     AddToLikedSongs(current: false),
+            "<C-s>l":     ToggleLikedSongs,
             "<C-s>L":     AddToLikedSongs(current: true),
             "r":          Rate(),
         },

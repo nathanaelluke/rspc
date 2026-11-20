@@ -321,7 +321,23 @@ pub fn add_to_liked_songs(
     ctx: &Ctx,
     songs: impl FnOnce(&mut Client<'_>) -> Result<Vec<String>> + Send + 'static,
 ) {
-    update_liked_songs(ctx, songs, false);
+    update_liked_songs(ctx, songs, LikedSongsEdit::Add);
+}
+
+pub fn update_selected_liked_songs(
+    ctx: &Ctx,
+    songs: impl FnOnce(&mut Client<'_>) -> Result<Vec<String>> + Send + 'static,
+    toggle: bool,
+) {
+    update_liked_songs(
+        ctx,
+        songs,
+        if toggle {
+            LikedSongsEdit::Toggle
+        } else {
+            LikedSongsEdit::Add
+        },
+    );
 }
 
 fn liked_song_paths(mut paths: Vec<String>) -> Result<Vec<String>> {
@@ -357,7 +373,7 @@ pub fn remove_from_liked_songs(ctx: &Ctx, paths: Vec<String>) -> Result<()> {
                 confirm_label: Some("Remove"),
                 cancel_label: None,
                 on_confirm: Box::new(move |ctx| {
-                    update_liked_songs(ctx, move |_| Ok(paths), true);
+                    update_liked_songs(ctx, move |_| Ok(paths), LikedSongsEdit::Remove);
                     Ok(())
                 }),
             })
@@ -367,15 +383,22 @@ pub fn remove_from_liked_songs(ctx: &Ctx, paths: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum LikedSongsEdit {
+    Add,
+    Remove,
+    Toggle,
+}
+
 fn update_liked_songs(
     ctx: &Ctx,
     songs: impl FnOnce(&mut Client<'_>) -> Result<Vec<String>> + Send + 'static,
-    remove: bool,
+    edit: LikedSongsEdit,
 ) {
-    let command = if remove {
-        "rspc_library_remove"
-    } else {
-        "rspc_library_add"
+    let command = match edit {
+        LikedSongsEdit::Add => "rspc_library_add",
+        LikedSongsEdit::Remove => "rspc_library_remove",
+        LikedSongsEdit::Toggle => "rspc_library_toggle",
     };
     if !ctx.supported_commands.contains(command) {
         status_warn!(
@@ -390,24 +413,23 @@ fn update_liked_songs(
             status_warn!("No songs selected");
             return Ok(());
         }
-        let count = if remove {
-            client.remove_liked_tracks(&paths)?
-        } else {
-            client.add_liked_tracks(&paths)?
+        let (added, removed) = match edit {
+            LikedSongsEdit::Add => (client.add_liked_tracks(&paths)?, 0),
+            LikedSongsEdit::Remove => (0, client.remove_liked_tracks(&paths)?),
+            LikedSongsEdit::Toggle => client.toggle_liked_tracks(&paths)?,
         };
-        if count == 0 {
-            if remove {
-                status_info!("Not in Liked Songs");
-            } else {
-                status_info!("Already in Liked Songs");
-            }
-        } else {
-            let suffix = if count == 1 { "" } else { "s" };
-            if remove {
-                status_info!("Removed {count} song{suffix} from Liked Songs");
-            } else {
+        match (added, removed) {
+            (0, 0) if matches!(edit, LikedSongsEdit::Remove) => status_info!("Not in Liked Songs"),
+            (0, 0) => status_info!("Already in Liked Songs"),
+            (count, 0) => {
+                let suffix = if count == 1 { "" } else { "s" };
                 status_info!("Added {count} song{suffix} to Liked Songs");
             }
+            (0, count) => {
+                let suffix = if count == 1 { "" } else { "s" };
+                status_info!("Removed {count} song{suffix} from Liked Songs");
+            }
+            _ => status_info!("Liked {added} and unliked {removed} in Liked Songs"),
         }
         Ok(())
     });

@@ -35,7 +35,7 @@ mod input_section;
 mod library;
 pub use library::{
     add_saved_library_actions, add_song_collection_actions, add_to_liked_songs,
-    remove_from_liked_songs,
+    remove_from_liked_songs, update_selected_liked_songs,
 };
 mod list_section;
 pub mod modal;

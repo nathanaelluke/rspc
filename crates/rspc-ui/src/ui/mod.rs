@@ -988,9 +988,11 @@ impl<'ui> Ui<'ui> {
     pub fn on_event(&mut self, mut event: UiEvent, ctx: &mut Ctx) -> Result<()> {
         match event {
             UiEvent::Database => {
-                ctx.input.clear_all_buffers();
                 ctx.liked_song_uris.borrow_mut().take();
-                if !ctx.supported_commands.contains("rspc_identity") {
+                let rspc = ctx.supported_commands.contains("rspc_identity");
+                ctx.input
+                    .retain_buffers(|id| rspc && self.panes.search.owns_input_buffer(id));
+                if !rspc {
                     status_warn!(
                         "The music database has been updated. Some parts of the UI may have been reinitialized to prevent inconsistent behaviours."
                     );

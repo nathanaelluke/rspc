@@ -16,6 +16,43 @@ struct Request {
 }
 
 #[tokio::test]
+async fn toggling_tracks_sends_each_membership_change_in_one_write() {
+    use crate::spotify::protocol::collection::{CollectionItem, PageResponse, WriteRequest};
+    let liked = uri("track", 1);
+    let unliked = uri("track", 2);
+    let before = PageResponse {
+        items: vec![CollectionItem {
+            uri: liked.clone(),
+            added_at: 1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (client, task) = server(vec![
+        (200, before.write_to_bytes().unwrap()),
+        (200, Vec::new()),
+    ])
+    .await;
+    assert_eq!(
+        collection::toggle_tracks(&client, &[liked.clone(), unliked.clone(), liked.clone()])
+            .await
+            .unwrap(),
+        (1, 1)
+    );
+    let requests = task.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let write = WriteRequest::parse_from_bytes(&requests[1].body).unwrap();
+    assert_eq!(
+        write
+            .items
+            .iter()
+            .map(|item| (item.uri.as_str(), item.is_removed))
+            .collect::<Vec<_>>(),
+        vec![(liked.as_str(), true), (unliked.as_str(), false)]
+    );
+}
+
+#[tokio::test]
 async fn liking_tracks_preserves_existing_addition_dates_and_refreshes_membership() {
     use crate::spotify::protocol::collection::{CollectionItem, PageResponse, WriteRequest};
     let old = uri("track", 1);
