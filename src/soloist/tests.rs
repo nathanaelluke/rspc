@@ -5,7 +5,8 @@ fn package_player_precedes_legacy_install_but_not_an_explicit_override() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("state");
-    let bin = temp.path().join("package bin");
+    let prefix = temp.path().join("package prefix");
+    let bin = prefix.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(state.join("soloist-package/bin")).unwrap();
     let legacy = state.join("soloist-package/bin/soloist");
@@ -14,15 +15,24 @@ fn package_player_precedes_legacy_install_but_not_an_explicit_override() {
     std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(&packaged, "packaged").unwrap();
     let search = Some(std::env::join_paths([&bin]).unwrap());
-    assert_eq!(find_binary(None, search.clone(), &state), legacy);
+    assert_eq!(find_binary(None, search.clone(), None, &state), legacy);
     std::fs::set_permissions(&packaged, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(find_binary(None, search.clone(), &state), packaged);
+    assert_eq!(find_binary(None, search.clone(), None, &state), packaged);
     let explicit = temp.path().join("missing-override");
     assert_eq!(
-        find_binary(Some(explicit.clone().into_os_string()), search, &state),
+        find_binary(
+            Some(explicit.clone().into_os_string()),
+            search,
+            None,
+            &state
+        ),
         explicit
     );
-    assert_eq!(find_binary(None, None, &state), legacy);
+    assert_eq!(find_binary(None, None, None, &state), legacy);
+    let cask = prefix.join("Caskroom/rspc/0.1.2/rspc-0.1.2/bin/rspc");
+    for launcher in [bin.join("rspc"), cask] {
+        assert_eq!(find_binary(None, None, Some(&launcher), &state), packaged);
+    }
 }
 
 async fn authenticated(soloist: &Soloist) {

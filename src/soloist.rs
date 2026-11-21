@@ -9,7 +9,7 @@ use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc, Mutex,
@@ -367,6 +367,7 @@ pub fn binary() -> PathBuf {
     find_binary(
         std::env::var_os("RSPC_SOLOIST_PATH"),
         std::env::var_os("PATH"),
+        std::env::current_exe().ok().as_deref(),
         &crate::paths::state(),
     )
 }
@@ -374,7 +375,8 @@ pub fn binary() -> PathBuf {
 fn find_binary(
     explicit: Option<std::ffi::OsString>,
     search: Option<std::ffi::OsString>,
-    state: &std::path::Path,
+    launcher: Option<&Path>,
+    state: &Path,
 ) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
@@ -395,12 +397,19 @@ fn find_binary(
     }) {
         return path;
     }
+    let launcher_dir = launcher.and_then(Path::parent);
+    let homebrew_prefix = launcher_dir
+        .and_then(|dir| dir.ancestors().find(|parent| parent.ends_with("Caskroom")))
+        .and_then(Path::parent);
     let candidates = [
-        state.join("soloist-bin/soloist"),
-        state.join("soloist-package/bin/soloist"),
+        launcher_dir.map(|dir| dir.join("soloist")),
+        homebrew_prefix.map(|prefix| prefix.join("bin/soloist")),
+        Some(state.join("soloist-bin/soloist")),
+        Some(state.join("soloist-package/bin/soloist")),
     ];
     candidates
         .into_iter()
+        .flatten()
         .find(executable)
         .unwrap_or_else(|| state.join("soloist-bin/soloist"))
 }
