@@ -212,8 +212,20 @@ fn recipes_have_real_checksums_and_existing_player_dependencies() -> Result<()> 
     let output = tmp.path().join("recipes");
     release::recipes(&xtask::root(), &assets, &output)?;
     let cask = fs::read_to_string(output.join("homebrew/Casks/rspc.rb"))?;
-    assert!(cask.contains("depends_on cask: \"spotify-soloist\""));
-    assert!(cask.contains("depends_on formula: \"openssl@3\""));
+    let dependencies = cask
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("depends_on "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dependencies,
+        [
+            "depends_on arch: :arm64",
+            "depends_on macos: :ventura",
+            "depends_on cask: \"spotify-soloist\"",
+            "depends_on formula: \"openssl@3\"",
+        ]
+    );
     assert!(!cask.contains("no_check"));
     for target in release::TARGETS {
         assert!(cask.contains(&release::digest(
